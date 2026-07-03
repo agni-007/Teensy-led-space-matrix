@@ -63,7 +63,7 @@ All components share a common reference baseline (ground) to prevent ground loop
 
 ---
 
-## 📦 Summary
+## 📦 Summary (Phase 1)
 
 | Layer | Component | Role |
 |---|---|---|
@@ -71,3 +71,65 @@ All components share a common reference baseline (ground) to prevent ground loop
 | Link | UART (Serial1) | Transfers framed packets (`<...>`) between boards |
 | Hardware | Teensy 4.1 (async state machine) | Parses packets, drives WS2812B strip |
 | Output | WS2812B (5-pixel strip) | Visual LED output |
+
+---
+
+## Phase 2: Hardware Scaling & Advanced FX Development
+
+### 1. Architectural Scaling (92-LED Strip Integration)
+
+The system was scaled from an isolated 5-LED testing array to a full-sized 92-LED WS2812B matrix. This hardware scaling introduced new serial throughput requirements, power rail stability demands, and high-frequency data transmission challenges.
+
+---
+
+### ❌ Chronological Log of Latest Errors & Challenges
+
+#### Challenge 5: Fixed Packet-Buffer Lockout & Array Truncation
+
+**Symptom:** After connecting the new 92-LED strip, only the first 5 pixels illuminated; the remaining 87 LEDs remained completely unpowered/dark.
+
+**Root Cause:** The UART protocol was still running the initial rigid 15-channel loop structure (`5 LEDs × 3 colors`). The Teensy driver stopped processing data indices after the 15th position, leaving subsequent LEDs unaddressed.
+
+**Solution:**
+- Refactored the web dashboard and ESP32 gateway to stream a streamlined 3-channel global master color packet (`<S,R,G,B>`) instead of mapping individual pixels over the serial bus.
+- Scaled `#define NUM_LEDS` to `92` on the Teensy code to open up the entire register.
+
+#### Challenge 6: High-Speed Signal Ringing & Pattern Scrambling
+
+**Symptom:** The Teensy was successfully intercepting commands via UART, but the strip outputted completely chaotic, flickering colors. The traveling patterns were unrecognizable, and the strip desynchronized.
+
+**Root Cause:**
+- **Impedance Mismatch / Ringing:** The Teensy 4.1's fast 600MHz processor produces extremely sharp square wave signal edges. Over the extended data line running to 92 LEDs, these sharp transitions caused electrical reflections (ringing). The gatekeeper pixel interpreted this ringing as extra clock pulses, scrambling the incoming data stream.
+- **Power Rail Ripple:** The sharp increase in current pull across 92 LEDs induced microsecond voltage drops (ripple noise) on the power lines, causing the LEDs to lose sync with the 3.3V data signal threshold.
+
+**Solution:**
+- **Software Signal Slowdown:** Adjusted the code to apply an explicit `delay(1)` (1 millisecond) latching/settling guard window immediately following the `strip.show()` frame rendering cycle to allow electrical noise to dissipate before the next transfer.
+- **Current Surge Suppression:** Lowered the global software brightness setting to `64` (~25% duty cycle) to flatten high-current draw spikes and eliminate supply rail ripples.
+- **Hardware Backstop:** Twisted the data wire (Pin 14) tightly parallel with the ground return wire to reduce electromagnetic loop area and prepared an inline 330Ω damping resistor to absorb signal reflections.
+
+---
+
+### 🚀 Latest Feature Implementations
+
+#### Algorithmic Wave-Generation Engine
+
+To maximize the visual performance of the stable 92-LED array without blocking the UART stream, the animation engine was upgraded from rigid pixel shifting to Mathematical Phase-Shifting Waves. The engine now runs at 60+ FPS using non-blocking `millis()` tracking across 7 distinct high-velocity modes:
+
+1. **Mode 1: Fast Travel Pulse** — Fast traveling single white core leaving a cyan trail.
+2. **Mode 2: Dual Collision** — Dual inbound traveling pulses meeting at the absolute midpoint (pixel 46) triggering an intense flashing center-impact sequence.
+3. **Mode 3: Hyper Flash Strobe** — Blazing 35ms alternating full-strip strobe shifts (Neon Green to Deep Violet).
+4. **Mode 4: Hyper-Drive Rainbow Chase** — Math-based continuous color spectrum wheel mapped sequentially across all 92 pixels via phase offsets.
+5. **Mode 5: Cyberpunk Neon Pulse** — Moving 8-pixel high-contrast blocks shifting Neon Cyan and Neon Magenta across the array.
+6. **Mode 6: Emergency Beacon Sweeper** — Interlocking triangle-wave pulses crossing paths with localized peak intensity scaling (Amber-Red vs Blue).
+7. **Mode 7: Meteor Rain** — Real-time decay tracking that continuously dims pixels by 20% to generate organic, sparkling trails trailing a high-speed comet head.
+
+---
+
+## 📦 Summary (Phase 2)
+
+| Layer | Component | Role |
+|---|---|---|
+| Network | ESP32 (Wi-Fi AP + HTTP server) | Streams global master color packets (`<S,R,G,B>`) |
+| Link | UART (Serial1) | Transfers framed packets between boards |
+| Hardware | Teensy 4.1 (async state machine) | Renders 7 phase-shifting wave FX modes at 60+ FPS |
+| Output | WS2812B (92-pixel strip) | Visual LED output with brightness-limited, ringing-suppressed signal |
