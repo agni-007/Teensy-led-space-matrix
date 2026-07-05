@@ -267,3 +267,108 @@ Speed range 1–10. Internal multiplier: `speedMult = 0.05 + (speed-1) × (1.95/
 | Link | UART Serial1 115200 | `<...>` framed packets |
 | Rendering | Teensy 4.1 + ObjectFLED DMA | 2D canvas, 10 themes, 9-lane parallel output |
 | Output | 9×10 WS2812B matrix | Test rig, 90 pixels, all themes validated |
+
+---
+
+## Phase 4 — Scrolling Text & Speed Tuning
+
+### Overview
+
+Added on-the-fly scrolling text rendering to the matrix without reflashing either board. Text content and scroll speed are set entirely from the dashboard over Wi-Fi. A hand-built 5×7 pixel font is rendered directly on the Teensy framebuffer, vertically centered in the 9-row display.
+
+---
+
+### Feature — Scrolling Text Engine
+
+A new theme (ID 11) renders an arbitrary ASCII message as a continuously looping horizontal marquee. The font and scroll engine are implemented entirely on the Teensy; the ESP32 acts only as a relay.
+
+**Font:** 5×7 bitmap, hand-defined per glyph. Supports A–Z, 0–9, and punctuation (`. , ! ? : - '`). Each character occupies 5 pixel columns with a 1-column blank gap (pitch = 6). The 7-row glyph is vertically centered with 1 blank row above and below within the 9-row display, exploiting the tighter vertical LED spacing for maximum readability.
+
+**Scroll speed:** Decoupled from the general theme speed multiplier. Maps speed slider 1–10 linearly to **1–20 px/sec**, giving a readable slow crawl at minimum and a fast marquee at maximum without modifying any other theme's timing.
+
+**Loop behaviour:** Text scrolls fully off the left edge before restarting from the right. A blank gap equal to one screen width separates the end of the message from the next loop, preventing visual wrap-collision.
+
+---
+
+### Serial Protocol Addition
+
+| Packet | Format | Action |
+|---|---|---|
+| Scroll text | `<T,MESSAGE>` | Set message string and switch to theme 11 |
+
+- Message is passed as raw ASCII (uppercase enforced by ESP32 before transmission).
+- Unsupported characters are substituted with a blank space by the ESP32 before the packet is sent.
+- Maximum message length: 60 characters.
+- The `<T,...>` parser on the Teensy uses a dedicated raw-text capture path, completely isolated from the existing numeric tokenizer used by all other packet types.
+
+---
+
+### Dashboard Addition
+
+A **Scrolling Text** card was added below the Color card:
+
+- Free-text input field (max 60 chars).
+- **"Scroll This Text"** button — sets theme dropdown to 11, sends `<A,11,speed>` followed by `<T,MESSAGE>`.
+- Speed and Brightness sliders apply to scroll text identically to all other themes — no new controls required.
+- Character set note displayed inline below the input field.
+
+---
+
+### 11. Scroll Speed Ceiling Too Low
+
+**Symptom:** At speed 10 the marquee was readable but not noticeably fast; no visible "high speed" effect on the physical matrix.
+
+**Root Cause:** Original speed mapping capped scroll rate at 8 px/sec, which on a 10-column display produces only moderate motion.
+
+**Resolution:** Raised speed ceiling from 8 px/sec to 20 px/sec by adjusting the scroll speed multiplier constant:
+```cpp
+// Before
+float scrollSpeedPxPerSec = 1.0f + (themeSpeed - 1) * (7.0f / 9.0f);
+
+// After
+float scrollSpeedPxPerSec = 1.0f + (themeSpeed - 1) * (19.0f / 9.0f);
+```
+Minimum (speed 1) unchanged at 1 px/sec.
+
+---
+
+### Updated Serial Protocol
+
+| Packet | Format | Action |
+|---|---|---|
+| Static color | `<S,r,g,b>` | Set foreground color |
+| Theme + speed | `<A,mode,speed>` | Switch theme 0–11, speed 1–10 |
+| Brightness | `<B,val>` | Live brightness 0–255 |
+| Single pixel | `<P,row,col>` | Light one pixel at coordinates |
+| Scroll text | `<T,MESSAGE>` | Set scroll message, activate theme 11 |
+| Clear | `<X>` | All pixels off immediately |
+
+---
+
+### Updated Theme Library
+
+| ID | Name | Behaviour |
+|---|---|---|
+| 0 | Static Fill | Solid foreground color, full matrix |
+| 1 | Wipe Left | Fills from left edge, holds, resets |
+| 2 | Wipe Right | Fills from right edge |
+| 3 | Wipe Top | Fills from top row downward |
+| 4 | Wipe Bottom | Fills from bottom row upward |
+| 5 | Row Scan | One row at a time, prints row index and pin to Serial |
+| 6 | Col Scan | One column at a time, prints column index to Serial |
+| 7 | Dual H Sync | Left and right meet at center column |
+| 8 | Dual V Sync | Top and bottom meet at center row |
+| 9 | All Sides | All four edges converge inward as concentric rings |
+| 10 | Single Pixel | One pixel via `<P,row,col>` |
+| 11 | Scroll Text | 5×7 marquee, message set via `<T,...>`, 1–20 px/sec |
+
+---
+
+## Summary — Phase 4
+
+| Layer | Component | Role |
+|---|---|---|
+| Network | ESP32 WiFi AP + WebServer | Sanitizes and forwards text packets, hosts updated dashboard |
+| Link | UART Serial1 115200 | `<T,...>` raw-text packets alongside existing numeric protocol |
+| Rendering | Teensy 4.1 + ObjectFLED DMA | 5×7 font engine, scroll position accumulator, theme 11 dispatch |
+| Output | 9×10 WS2812B matrix | Scrolling text confirmed readable at all speeds 1–10 |
