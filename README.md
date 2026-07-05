@@ -133,3 +133,56 @@ To maximize the visual performance of the stable 92-LED array without blocking t
 | Link | UART (Serial1) | Transfers framed packets between boards |
 | Hardware | Teensy 4.1 (async state machine) | Renders 7 phase-shifting wave FX modes at 60+ FPS |
 | Output | WS2812B (92-pixel strip) | Visual LED output with brightness-limited, ringing-suppressed signal |
+
+---
+
+## Phase 3: 2D Matrix Architecture — 9×10 Test Rig
+
+### Overview
+
+Scaled architecture from a single 92-LED strip to a **9-row × 10-LED 2D matrix** (90 pixels total) built as a physical test rig to validate all rendering logic before deployment on the full 18×508 TinkerSpace LED wall. Each row is an independent WS2812B strip with its own data line driven in true hardware-parallel via ObjectFLED's DMA engine on the Teensy 4.1.
+
+---
+
+### 🔌 Phase 3 Hardware Configuration
+
+| Parameter | Value |
+|---|---|
+| Matrix dimensions | 9 rows × 10 LEDs/row = 90 pixels |
+| LED type | WS2812B (5050 package, integrated driver, single-wire) |
+| Color order | GRB, 800kHz |
+| Teensy data pins | `3, 5, 7, 9, 11, 24, 26, 28, 30` (one per row, reverse physical order) |
+| ESP32 UART | TX=GPIO5 → Teensy RX (Serial1), RX=GPIO4 |
+| Power | Each strip independently powered from external 5V rail |
+| Common ground | Teensy GND tied to LED strip GND rail |
+
+---
+
+### 🔁 Architecture Changes from Phase 2
+
+| Aspect | Phase 2 | Phase 3 |
+|---|---|---|
+| LED driver library | `Adafruit_NeoPixel` (single strip, blocking) | `ObjectFLED` (18-lane DMA parallel, non-blocking) |
+| Output model | Sequential `.show()` per strip | Single `.show()` pushes all lanes simultaneously via DMA |
+| Framebuffer | None (direct pixel writes) | Shared `CRGB canvas[NUM_ROWS][LEDS_PER_ROW]` — all themes write into this |
+| Theme system | 7 hardcoded 1D modes | Enum-dispatched 2D render functions, each a pure canvas writer |
+| Color math | Manual RGB arithmetic | FastLED `CRGB`/`CHSV`/`inoise8()` (output still via ObjectFLED) |
+| Scaling | Hardcoded `NUM_LEDS=92` | `#define NUM_ROWS` + `#define LEDS_PER_ROW` — full wall is 2-line change |
+
+---
+
+### ❌ Phase 3 Errors & Diagnostics
+
+#### Challenge 7: `ObjectFLED.h` — No Such File
+
+**Symptom:** `fatal error: ObjectFLED.h: No such file or directory`
+
+**Root Cause:** ObjectFLED is not in the Arduino Library Manager and is not bundled with Teensyduino. The `main` branch is also explicitly flagged by the maintainer as untested.
+
+**Solution:** Download the packaged release `.zip` from `https://github.com/KurtMF/ObjectFLED/releases` and install via Arduino IDE: `Sketch → Include Library → Add .ZIP Library`. Do not clone `main` directly.
+
+---
+
+#### Challenge 8: `fl::memset` Namespace Collision
+
+**Symptom:**
