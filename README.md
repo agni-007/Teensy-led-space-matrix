@@ -4,185 +4,266 @@ A decoupled Web-to-Hardware LED control subsystem using a dual-microcontroller a
 
 ---
 
-## 🛠️ Project Overview & Architecture
+## Project Overview & Architecture
 
 This project separates web-facing networking logic from time-critical LED driving logic by splitting the work across two microcontrollers:
 
-- **Master Gateway (ESP32)** — Configured as a Wi-Fi Access Point (`RGB_Control`) running an HTTP web server. It handles incoming parameters from a custom dashboard and serializes them down a hardware UART bus.
-- **Slave Driver (Teensy 4.1)** — Listens asynchronously on `Serial1`. It runs a non-blocking state machine that parses incoming payloads and drives a 5-pixel WS2812B addressable LED strip.
+- **Master Gateway (ESP32)** — Configured as a Wi-Fi Access Point running an HTTP web server. Handles incoming parameters from a custom dashboard and serializes them down a hardware UART bus.
+- **Slave Driver (Teensy 4.1)** — Listens asynchronously on `Serial1`. Runs a non-blocking state machine that parses incoming payloads and drives WS2812B addressable LED strips.
 
 This decoupling ensures that Wi-Fi client handling and HTTP request processing on the ESP32 never interfere with the high-frequency, timing-sensitive data protocol required to drive WS2812B LEDs.
 
 ---
 
-## 🔌 Hardware Connections & Wiring Matrix
+## Hardware Connections & Wiring Matrix
 
 All components share a common reference baseline (ground) to prevent ground loops and signal floating.
 
-| From Component | Pin | To Component | Pin | Purpose |
+| From | Pin | To | Pin | Purpose |
 |---|---|---|---|---|
-| ESP32 | GPIO 5 (TX1) | Teensy 4.1 | Pin 0 (RX1) | UART serial communication link |
-| ESP32 | GND | Teensy 4.1 | G (Ground) | Common logic ground |
-| Teensy 4.1 | Pin 14 | WS2812B Strip | DI (Data In) | High-speed data line (via inline 330Ω resistor) |
-| Teensy 4.1 | G (Ground) | WS2812B Strip | GND | Return path to common ground |
-| 5V Power Panel | V+ (+5V) | WS2812B Strip | +5V | Dedicated high-current power rail |
-| 5V Power Panel | V- (GND) | Teensy/ESP32 | GND / G | Power supply ground integration |
+| ESP32 | GPIO5 (TX1) | Teensy 4.1 | Pin 0 (RX1) | UART serial communication |
+| ESP32 | GND | Teensy 4.1 | GND | Common logic ground |
+| Teensy 4.1 | Pin 14 | WS2812B Strip | DIN | High-speed data line |
+| Teensy 4.1 | GND | WS2812B Strip | GND | Return path to common ground |
+| 5V Power Panel | V+ | WS2812B Strip | +5V | Dedicated high-current power rail |
+| 5V Power Panel | V- | Teensy/ESP32 | GND | Power supply ground integration |
 
 ---
 
-## ❌ Encountered Errors & Diagnostic Log
+## Errors & Resolutions
 
 ### 1. Hardware Serial Conflict (Pin 1)
-**Symptom:** The Teensy compiled cleanly but produced compile warnings regarding hardware constraints, and the LED strip failed to illuminate.
 
-**Root Cause:** The data line was initially assigned to Pin 1 (TX1). Because the Teensy was using `Serial1` to talk to the ESP32, the internal UART registers locked the pin, blocking the high-frequency NeoPixel data stream.
+**Symptom:** Teensy compiled cleanly but LED strip failed to illuminate.
 
-### 2. Logic Level Verification & Pin Mapping Confusion
-**Symptom:** Moving to lower digital pins still showed 0.01V on a multimeter tracking loop, indicating a dead pin state.
+**Root Cause:** Data line assigned to Pin 1 (TX1). Teensy was using `Serial1` to communicate with the ESP32, so the internal UART registers locked the pin, blocking the NeoPixel data stream.
 
-**Root Cause:** Multimeter probe mode mismatch combined with specific FastLED compiler target mismatches on the NXP MIMXRT1062 processor caused the lower pin registers to fail to clear on boot.
+**Resolution:** Migrated data wire to Pin 14, which is isolated from all hardware serial lines.
+
+---
+
+### 2. Logic Level & Pin Mapping Confusion
+
+**Symptom:** Moving to lower digital pins still showed 0.01V on multimeter, dead pin state.
+
+**Root Cause:** Multimeter probe mode mismatch combined with FastLED compiler target mismatches on the NXP MIMXRT1062 caused lower pin registers to fail to clear on boot.
+
+**Resolution:** Switched from FastLED to `Adafruit_NeoPixel` on Teensy 4.1, which cleanly overrides the board's clock registers without mapping bugs.
+
+---
 
 ### 3. Bit-Drifting / Color Channel Jumbling
-**Symptom:** Pixel 0 displayed correctly, but trailing pixels displayed random colors (e.g., selecting White resulted in Cyan or Red down the line).
 
-**Root Cause:** The initial string payload used variable-length structures parsed via unstable index cutting (`indexOf`). When strings fluctuated in length or encountered rapid UART transfers, the arrays shifted, throwing off subsequent RGB channel assignments.
+**Symptom:** Pixel 0 displayed correctly, trailing pixels showed random colors.
+
+**Root Cause:** String payload used variable-length structures parsed via unstable `indexOf`. When strings fluctuated in length or rapid UART transfers occurred, arrays shifted and threw off RGB channel assignments.
+
+**Resolution:** Replaced arbitrary delimiters with a rigid `<` / `>` framing protocol. Teensy processes data via a strict byte-level sequential tokenizer, ignoring all noise outside the frame markers.
+
+---
 
 ### 4. Power Injection Noise on Heavy Frames
-**Symptom:** Selecting high-current colors like full White (`#FFFFFF`) induced data corruption and erratic flashing.
 
-**Root Cause:** Turning on all color dies at once induced an instantaneous voltage drop on the power rails, shrinking the 3.3V logic threshold and corrupting data frames at the first pixel.
+**Symptom:** Full white `#FFFFFF` induced data corruption and erratic flashing.
 
----
+**Root Cause:** All LEDs switching simultaneously caused an instantaneous voltage drop, shrinking the 3.3V logic threshold and corrupting data frames at the first pixel.
 
-## ✅ Resolution Actions Taken
-
-1. **Pin Migration** — Moved the data wire permanently to Pin 14 (located mid-way along the right outer edge of the Teensy 4.1), which safely isolates the signal from any hardware serial line interference.
-2. **Library Pivot** — Switched from `FastLED` to `Adafruit_NeoPixel` on the Teensy 4.1, which cleanly overrides the board's high-speed clock registers without mapping bugs.
-3. **Marker-Based Packet Framing** — Replaced the arbitrary delimiter string with a rigid framing protocol wrapping data between `<` and `>` tags (e.g., `<S,255,0,0...>` and `<A,ModeID>`). The Teensy now ignores external noise and processes data via a strict byte-level sequential tokenizer.
-4. **Asynchronous Engine Implementation** — Rewrote the Teensy loop into an async state machine driven by `millis()` deltas rather than blocking `delay()` calls. This preserves 60+ FPS animation frame rates for operations like Fast Travel, Dual Collision, and Strobe while keeping the serial link open to intercept immediate dashboard interruptions.
+**Resolution:** Lowered global brightness to 64 (~25% duty cycle). Added 1ms settling delay after `strip.show()`. Twisted data wire with ground return wire to reduce loop area.
 
 ---
 
-## 📦 Summary (Phase 1)
+## Summary — Phase 1
 
 | Layer | Component | Role |
 |---|---|---|
-| Network | ESP32 (Wi-Fi AP + HTTP server) | Receives dashboard input, serializes to UART |
-| Link | UART (Serial1) | Transfers framed packets (`<...>`) between boards |
-| Hardware | Teensy 4.1 (async state machine) | Parses packets, drives WS2812B strip |
-| Output | WS2812B (5-pixel strip) | Visual LED output |
+| Network | ESP32 (WiFi AP + HTTP server) | Receives dashboard input, serializes to UART |
+| Link | UART Serial1 | Transfers framed packets between boards |
+| Hardware | Teensy 4.1 | Parses packets, drives WS2812B strip |
+| Output | WS2812B 5-pixel strip | Visual LED output |
 
 ---
 
-## Phase 2: Hardware Scaling & Advanced FX Development
-
-### 1. Architectural Scaling (92-LED Strip Integration)
-
-The system was scaled from an isolated 5-LED testing array to a full-sized 92-LED WS2812B matrix. This hardware scaling introduced new serial throughput requirements, power rail stability demands, and high-frequency data transmission challenges.
-
----
-
-### ❌ Chronological Log of Latest Errors & Challenges
-
-#### Challenge 5: Fixed Packet-Buffer Lockout & Array Truncation
-
-**Symptom:** After connecting the new 92-LED strip, only the first 5 pixels illuminated; the remaining 87 LEDs remained completely unpowered/dark.
-
-**Root Cause:** The UART protocol was still running the initial rigid 15-channel loop structure (`5 LEDs × 3 colors`). The Teensy driver stopped processing data indices after the 15th position, leaving subsequent LEDs unaddressed.
-
-**Solution:**
-- Refactored the web dashboard and ESP32 gateway to stream a streamlined 3-channel global master color packet (`<S,R,G,B>`) instead of mapping individual pixels over the serial bus.
-- Scaled `#define NUM_LEDS` to `92` on the Teensy code to open up the entire register.
-
-#### Challenge 6: High-Speed Signal Ringing & Pattern Scrambling
-
-**Symptom:** The Teensy was successfully intercepting commands via UART, but the strip outputted completely chaotic, flickering colors. The traveling patterns were unrecognizable, and the strip desynchronized.
-
-**Root Cause:**
-- **Impedance Mismatch / Ringing:** The Teensy 4.1's fast 600MHz processor produces extremely sharp square wave signal edges. Over the extended data line running to 92 LEDs, these sharp transitions caused electrical reflections (ringing). The gatekeeper pixel interpreted this ringing as extra clock pulses, scrambling the incoming data stream.
-- **Power Rail Ripple:** The sharp increase in current pull across 92 LEDs induced microsecond voltage drops (ripple noise) on the power lines, causing the LEDs to lose sync with the 3.3V data signal threshold.
-
-**Solution:**
-- **Software Signal Slowdown:** Adjusted the code to apply an explicit `delay(1)` (1 millisecond) latching/settling guard window immediately following the `strip.show()` frame rendering cycle to allow electrical noise to dissipate before the next transfer.
-- **Current Surge Suppression:** Lowered the global software brightness setting to `64` (~25% duty cycle) to flatten high-current draw spikes and eliminate supply rail ripples.
-- **Hardware Backstop:** Twisted the data wire (Pin 14) tightly parallel with the ground return wire to reduce electromagnetic loop area and prepared an inline 330Ω damping resistor to absorb signal reflections.
-
----
-
-### 🚀 Latest Feature Implementations
-
-#### Algorithmic Wave-Generation Engine
-
-To maximize the visual performance of the stable 92-LED array without blocking the UART stream, the animation engine was upgraded from rigid pixel shifting to Mathematical Phase-Shifting Waves. The engine now runs at 60+ FPS using non-blocking `millis()` tracking across 7 distinct high-velocity modes:
-
-1. **Mode 1: Fast Travel Pulse** — Fast traveling single white core leaving a cyan trail.
-2. **Mode 2: Dual Collision** — Dual inbound traveling pulses meeting at the absolute midpoint (pixel 46) triggering an intense flashing center-impact sequence.
-3. **Mode 3: Hyper Flash Strobe** — Blazing 35ms alternating full-strip strobe shifts (Neon Green to Deep Violet).
-4. **Mode 4: Hyper-Drive Rainbow Chase** — Math-based continuous color spectrum wheel mapped sequentially across all 92 pixels via phase offsets.
-5. **Mode 5: Cyberpunk Neon Pulse** — Moving 8-pixel high-contrast blocks shifting Neon Cyan and Neon Magenta across the array.
-6. **Mode 6: Emergency Beacon Sweeper** — Interlocking triangle-wave pulses crossing paths with localized peak intensity scaling (Amber-Red vs Blue).
-7. **Mode 7: Meteor Rain** — Real-time decay tracking that continuously dims pixels by 20% to generate organic, sparkling trails trailing a high-speed comet head.
-
----
-
-## 📦 Summary (Phase 2)
-
-| Layer | Component | Role |
-|---|---|---|
-| Network | ESP32 (Wi-Fi AP + HTTP server) | Streams global master color packets (`<S,R,G,B>`) |
-| Link | UART (Serial1) | Transfers framed packets between boards |
-| Hardware | Teensy 4.1 (async state machine) | Renders 7 phase-shifting wave FX modes at 60+ FPS |
-| Output | WS2812B (92-pixel strip) | Visual LED output with brightness-limited, ringing-suppressed signal |
-
----
-
-## Phase 3: 2D Matrix Architecture — 9×10 Test Rig
+## Phase 2 — Scaling to 92-LED Strip
 
 ### Overview
 
-Scaled architecture from a single 92-LED strip to a **9-row × 10-LED 2D matrix** (90 pixels total) built as a physical test rig to validate all rendering logic before deployment on the full 18×508 TinkerSpace LED wall. Each row is an independent WS2812B strip with its own data line driven in true hardware-parallel via ObjectFLED's DMA engine on the Teensy 4.1.
+Scaled from 5-LED test array to a full 92-LED WS2812B strip. Introduced new serial throughput requirements, power rail stability demands, and high-frequency transmission challenges.
 
 ---
 
-### 🔌 Phase 3 Hardware Configuration
+### 5. Packet-Buffer Lockout & Array Truncation
+
+**Symptom:** Only first 5 pixels lit; remaining 87 stayed dark.
+
+**Root Cause:** UART protocol still ran the original 15-channel loop structure (5 LEDs × 3 colors). Teensy stopped processing after the 15th index.
+
+**Resolution:** Refactored ESP32 and dashboard to send a 3-channel global color packet `<S,R,G,B>` instead of per-pixel addressing. Set `NUM_LEDS` to 92.
+
+---
+
+### 6. High-Speed Signal Ringing & Pattern Scrambling
+
+**Symptom:** Strip output completely chaotic flickering colors despite correct UART reception.
+
+**Root Cause:** Teensy 4.1 at 600MHz produces extremely sharp signal edges. Over a 92-LED data line, these caused electrical reflections. First pixel interpreted ringing as extra clock pulses, scrambling the data stream. Concurrent current surge across 92 LEDs caused microsecond voltage drops, further desynchronizing data framing.
+
+**Resolution:** Added explicit 1ms settling guard after `strip.show()`. Lowered brightness to 64. Inline 330Ω resistor on data line to damp reflections.
+
+---
+
+### Feature — Algorithmic Wave-Generation Engine
+
+Non-blocking animation engine using `millis()` delta timing at 60+ FPS across 7 modes:
+
+1. **Fast Travel Pulse** — Single white core with cyan trail.
+2. **Dual Collision** — Two pulses meet at pixel 46, trigger center flash.
+3. **Hyper Flash Strobe** — 35ms alternating full-strip strobe, green to violet.
+4. **Hyper-Drive Rainbow Chase** — Phase-offset color wheel across all 92 pixels.
+5. **Cyberpunk Neon Pulse** — 8-pixel blocks alternating cyan and magenta.
+6. **Emergency Beacon Sweeper** — Interlocking triangle-wave pulses, amber-red vs blue.
+7. **Meteor Rain** — Per-frame 20% pixel decay generating organic comet trails.
+
+---
+
+## Summary — Phase 2
+
+| Layer | Component | Role |
+|---|---|---|
+| Network | ESP32 (WiFi AP + HTTP server) | Streams global color packets |
+| Link | UART Serial1 | Framed packet transfer |
+| Hardware | Teensy 4.1 | Renders 7 wave FX modes at 60+ FPS |
+| Output | WS2812B 92-pixel strip | Brightness-limited, ringing-suppressed output |
+
+---
+
+## Phase 3 — 9×10 2D Matrix Test Rig
+
+### Overview
+
+Scaled from single strip to a 9-row × 10-LED matrix (90 pixels). Each row is an independent WS2812B strip driven in true hardware-parallel via ObjectFLED's DMA engine on Teensy 4.1. Built as a validation rig before deployment on the full 18×508 TinkerSpace wall.
+
+---
+
+### Hardware Configuration
 
 | Parameter | Value |
 |---|---|
-| Matrix dimensions | 9 rows × 10 LEDs/row = 90 pixels |
-| LED type | WS2812B (5050 package, integrated driver, single-wire) |
-| Color order | GRB, 800kHz |
-| Teensy data pins | `3, 5, 7, 9, 11, 24, 26, 28, 30` (one per row, reverse physical order) |
-| ESP32 UART | TX=GPIO5 → Teensy RX (Serial1), RX=GPIO4 |
-| Power | Each strip independently powered from external 5V rail |
-| Common ground | Teensy GND tied to LED strip GND rail |
+| Matrix | 9 rows × 10 LEDs = 90 pixels |
+| LED type | WS2812B, GRB, 800kHz |
+| Teensy data pins | `3, 5, 7, 9, 11, 24, 26, 28, 30` |
+| ESP32 UART | TX=GPIO5, RX=GPIO4 |
+| Power | Each strip independently powered, common GND |
 
 ---
 
-### 🔁 Architecture Changes from Phase 2
+### Architecture Changes
 
 | Aspect | Phase 2 | Phase 3 |
 |---|---|---|
-| LED driver library | `Adafruit_NeoPixel` (single strip, blocking) | `ObjectFLED` (18-lane DMA parallel, non-blocking) |
-| Output model | Sequential `.show()` per strip | Single `.show()` pushes all lanes simultaneously via DMA |
-| Framebuffer | None (direct pixel writes) | Shared `CRGB canvas[NUM_ROWS][LEDS_PER_ROW]` — all themes write into this |
-| Theme system | 7 hardcoded 1D modes | Enum-dispatched 2D render functions, each a pure canvas writer |
-| Color math | Manual RGB arithmetic | FastLED `CRGB`/`CHSV`/`inoise8()` (output still via ObjectFLED) |
-| Scaling | Hardcoded `NUM_LEDS=92` | `#define NUM_ROWS` + `#define LEDS_PER_ROW` — full wall is 2-line change |
+| LED driver | `Adafruit_NeoPixel`, blocking | `ObjectFLED`, DMA parallel non-blocking |
+| Output model | Sequential per-strip `.show()` | Single `.show()` pushes all lanes via DMA |
+| Framebuffer | None | `CRGB canvas[NUM_ROWS][LEDS_PER_ROW]` |
+| Theme system | 7 hardcoded 1D modes | Enum-dispatched 2D render functions |
+| Scaling | Hardcoded `NUM_LEDS` | `#define NUM_ROWS` + `#define LEDS_PER_ROW` |
 
 ---
 
-### ❌ Phase 3 Errors & Diagnostics
+### 7. FastLED `fl::memset` Namespace Collision
 
-#### Challenge 7: `ObjectFLED.h` — No Such File
+**Symptom:** `error: call of overloaded 'memset(CRGB[9][10], int, unsigned int)' is ambiguous`
 
-**Symptom:** `fatal error: ObjectFLED.h: No such file or directory`
+**Root Cause:** FastLED post-3.7 defines `fl::memset` inside `fl/stl/cstring.h`, polluting the global namespace and creating an ambiguous overload on any bare `memset()` call against a `CRGB` array.
 
-**Root Cause:** ObjectFLED is not in the Arduino Library Manager and is not bundled with Teensyduino. The `main` branch is also explicitly flagged by the maintainer as untested.
-
-**Solution:** Download the packaged release `.zip` from `https://github.com/KurtMF/ObjectFLED/releases` and install via Arduino IDE: `Sketch → Include Library → Add .ZIP Library`. Do not clone `main` directly.
+**Resolution:** Replaced all `memset(canvas, 0, sizeof(canvas))` calls with an explicit loop:
+```cpp
+void clearCanvas() {
+  for (int r = 0; r < NUM_ROWS; r++)
+    for (int c = 0; c < LEDS_PER_ROW; c++)
+      canvas[r][c] = CRGB::Black;
+}
+```
 
 ---
 
-#### Challenge 8: `fl::memset` Namespace Collision
+### 8. Capacitive Crosstalk on Parallel Data Lines
 
-**Symptom:**
+**Symptom:** Lighting one column caused both adjacent columns to flicker with random colors intermittently. Row operations were clean; column operations were not.
+
+**Root Cause:** 800kHz WS2812B edges (~150ns rise/fall) capacitively couple onto physically parallel wires. Teensy 4.1 outputs 3.3V logic; WS2812B guaranteed logic-high threshold is 3.5V at 5V supply — signal already marginal, making it more susceptible to coupled noise. Interference was non-deterministic because it depended on instantaneous rail voltage and contact resistance.
+
+**Diagnosis:** Added `delay(20)` settling pause between clear and show. Interference reduced significantly, confirming power rail transients as a contributing factor.
+
+**Resolution:** 330Ω series resistor on each data line at Teensy pin end. GND wire interleaved between every data line in the bundle. 100µF electrolytic at power entry point. 100nF ceramic cap per strip at VCC/GND pads.
+
+---
+
+### 9. Reverse Polarity — Full Matrix Failure
+
+**Symptom:** VCC/GND briefly swapped. After correction, entire 9-row matrix went dark with no visible physical damage.
+
+**Root Cause:** WS2812B has no reverse-polarity protection. Damaged chip failed shorted (not open), pulling the shared 5V rail to near-zero and killing all rows simultaneously.
+
+**Diagnosis:** Multimeter in resistance mode across each strip's VCC/GND pads with power off. Shorted strip reads near-0Ω; healthy strips read high impedance.
+
+**Resolution:** Cut strip at damaged pixel boundaries. Soldered jumper from upstream `DO/GND/5V` pads directly to downstream `DIN/GND/5V` pads, bypassing the dead chip. Matrix restored with one pixel position sacrificed.
+
+---
+
+### 10. Row 2 Dark After Polarity Repair
+
+**Symptom:** After bypass, row index 2 remained completely dark while all other rows responded.
+
+**Root Cause:** Polarity event destroyed the data input of the first pixel on that strip, breaking the chain for the entire row. Same bypass procedure applied to that strip. Pin array remapped to `{ 3, 5, 7, 9, 11, 24, 26, 28, 30 }` after finding original assignments conflicted with Teensy internal peripherals on several pins.
+
+**Resolution:** Same DIN bypass as above on row 2 strip. Confirmed working via row scan debug mode.
+
+---
+
+### Serial Protocol
+
+| Packet | Format | Action |
+|---|---|---|
+| Static color | `<S,r,g,b>` | Set foreground color |
+| Theme + speed | `<A,mode,speed>` | Switch theme 0–10, speed 1–10 |
+| Brightness | `<B,val>` | Live brightness 0–255 |
+| Single pixel | `<P,row,col>` | Light one pixel at coordinates |
+| Clear | `<X>` | All pixels off immediately |
+
+---
+
+### Theme Library
+
+Speed range 1–10. Internal multiplier: `speedMult = 0.05 + (speed-1) × (1.95/9)`. Speed 1 = 5% rate for debug observation. Speed 10 = 200% rate.
+
+| ID | Name | Behaviour |
+|---|---|---|
+| 0 | Static Fill | Solid foreground color, full matrix |
+| 1 | Wipe Left | Fills from left edge, holds, resets |
+| 2 | Wipe Right | Fills from right edge |
+| 3 | Wipe Top | Fills from top row downward |
+| 4 | Wipe Bottom | Fills from bottom row upward |
+| 5 | Row Scan | One row at a time, prints row index and pin to Serial |
+| 6 | Col Scan | One column at a time, prints column index to Serial |
+| 7 | Dual H Sync | Left and right meet at center column |
+| 8 | Dual V Sync | Top and bottom meet at center row |
+| 9 | All Sides | All four edges converge inward as concentric rings |
+| 10 | Single Pixel | One pixel via `<P,row,col>` |
+
+---
+
+### ESP32 Dashboard
+
+**WiFi AP:** `TinkerMatrix` / `tinker123` — open `192.168.4.1`
+
+**Controls:** Theme selector, speed slider (1–10, labelled debug-slow at minimum), brightness slider, color picker, preset color buttons (R/G/B/W), 9×10 interactive pixel grid showing `row,col` on each cell for individual pixel toggling, Clear All button.
+
+---
+
+## Summary — Phase 3
+
+| Layer | Component | Role |
+|---|---|---|
+| Network | ESP32 WiFi AP + WebServer | Hosts dashboard, forwards 5 command types |
+| Link | UART Serial1 115200 | `<...>` framed packets |
+| Rendering | Teensy 4.1 + ObjectFLED DMA | 2D canvas, 10 themes, 9-lane parallel output |
+| Output | 9×10 WS2812B matrix | Test rig, 90 pixels, all themes validated |
