@@ -341,3 +341,15 @@ Introduced dynamic, sprite-based themes to the massive matrix. Removed diagnosti
 | Network | ESP32 WiFi AP + WebServer | Exposes game theme selection to the dashboard |
 | Hardware | Teensy 4.1 | Processes autonomous physics calculations, sprite rendering, and gravity parameters |
 | Output | 18×508 WS2812B matrix | Displays complex multi-layered sprite animations smoothly |
+
+
+## Phase 7: Fully Wireless Text Rasterization, Dual-Core Optimization, & Infinite Auto-Dino Loop
+
+### Major Architectural Upgrades & Dual-Core Functionality
+* **100% Wireless Text Rasterization Engine:** Moved the 5x7 font lookup table and character rasterization logic entirely to the ESP32 Core 1. Text is now dynamically rasterized on the ESP32 and streamed down to the Teensy via high-speed pixel coordinate commands (`<P,r,c>`), eliminating the need to physically flash the Teensy for font or text updates.
+* **ESP32 Dual-Core Task Splitting:**
+  * **Core 0 (Network, Web & OTA):** Dedicated to handling the embedded web server, dashboard AJAX requests, Wi-Fi stack operations, and continuous over-the-air firmware updates without stuttering the display.
+  * **Core 1 (Game Physics, AI & Rasterization):** Runs the locked 60 FPS physics engine, hitbox collision detection, automatic color-cycling timer, and real-time text rasterization.
+* **Infinite Auto-Dino Looprun & Random Gaps:** Upgraded the Chrome Dino full-auto mode to run continuously in an infinite loop. Obstacles now spawn with randomized distance gaps (`random(100, 280)`), paired with an automated AI jump calculator and a 10-second 10-color palette shifting loop.
+* **Arcade Manual Mode & HUD Scoring:** Integrated a backend 3-try life tracking system, real-time score accumulation, and a localized "GAME OVER" display state driven by fast UART packet streaming (`<F>`).
+* **High-Speed UART Pipeline:** Maintained a robust 1.5 Mbps baud rate serial link where the ESP32 acts as the **brains** (math, logic, text parsing, and web state) and the Teensy 4.1 acts purely as a **dumb pixel GPU** (rendering the canvas buffer to the physical LED panels).
