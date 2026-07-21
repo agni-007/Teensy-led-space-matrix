@@ -5,8 +5,49 @@
 #define LEDS_PER_ROW  508
 #define SERIAL_LINK   Serial1
 
-// 18 physical output pins for parallel data transmission
+// =========================================================
+// 🛠️ MATRIX CONFIGURATION ZONE 
+// =========================================================
+// If the text enters from the wrong side, toggle this (true/false)
+#define INVERT_X_AXIS true  
+
+// If the text is upside down, toggle this (true/false)
+// NOTE: was `true` and still rendered upside down -> flipped to false.
+#define INVERT_Y_AXIS false  
+
+// --- Font scaling ---------------------------------------
+// Integer scale factors applied to the base 5x7 glyphs.
+// With NUM_ROWS = 18 and FONT_SCALE_Y = 2, glyph height becomes
+// 7*2 = 14 rows, leaving (18-14)/2 = 2px margin top & bottom.
+#define FONT_SCALE_X  2
+#define FONT_SCALE_Y  2
+
+#define GLYPH_W       5
+#define GLYPH_H       7
+#define CHAR_SPACING  1
+
+// Adjust this number to nudge the (scaled) text up or down.
+// 2 centers a 14-row-tall glyph on an 18-row matrix.
+#define TEXT_ROW_OFFSET 2    
+// =========================================================
+
+// Restored YOUR exact physical output pins!
 uint8_t rowPins[NUM_ROWS] = { 3, 5, 7, 9, 11, 24, 26, 28, 30, 32, 37, 39, 41, 14, 16, 18, 20, 22 };
+
+// =========================================================
+// ⚡ PER-ROW SPEED COMPENSATION
+// =========================================================
+// If specific rows visually lag behind the rest during wipes
+// (e.g. from resistance/voltage-sag on that wiring segment),
+// nudge their multiplier UP to make them "catch up" — 1.10 = 10%
+// faster clock for that row. Start small (1.02-1.10) and tune by eye.
+// Rows 7-11 correspond to pins 28, 30, 32, 37, 39 in rowPins[] above.
+float rowSpeedComp[NUM_ROWS] = {
+  1.00, 1.00, 1.00, 1.00, 1.00, 1.00, 1.00,   // rows 0-6
+  1.00, 1.00, 1.00, 1.00, 1.00,               // rows 7-11 <- tune these
+  1.00, 1.00, 1.00, 1.00, 1.00, 1.00          // rows 12-17
+};
+// =========================================================
 
 CRGB canvas[NUM_ROWS][LEDS_PER_ROW];
 ObjectFLED leds(NUM_ROWS * LEDS_PER_ROW, canvas, CORDER_GRB, NUM_ROWS, rowPins, 0);
@@ -25,7 +66,7 @@ enum ThemeID {
 
 ThemeID activeTheme = THEME_STATIC;
 uint8_t fgR = 0, fgG = 200, fgB = 255;
-uint8_t bright     = 40; // Default lowered for massive power safety
+uint8_t bright     = 35; // Kept low to protect your 80A power supply
 uint8_t themeSpeed = 3;
 
 float    themeClock = 0;
@@ -33,7 +74,7 @@ uint32_t lastFrameMicros = 0;
 
 String scrollText = "TINKERSPACE";
 float  scrollPos  = 0;
-const int CHAR_PITCH = 6;
+const int CHAR_PITCH = (GLYPH_W + CHAR_SPACING) * FONT_SCALE_X; // scaled pitch
 
 char   packetType = '\0';
 String currentToken = "";
@@ -130,7 +171,14 @@ void loop() {
 
   if (activeTheme == THEME_TEXT_SCROLL) {
     float scrollSpeedPxPerSec = 10.0f + (themeSpeed - 1) * (100.0f / 9.0f);
-    scrollPos += dt * scrollSpeedPxPerSec;
+    
+    // Always move mathematical position
+    scrollPos -= dt * scrollSpeedPxPerSec; 
+    
+    int textPixelWidth = scrollText.length() * CHAR_PITCH;
+    if (scrollPos < -textPixelWidth) {
+      scrollPos = LEDS_PER_ROW; // Reset seamlessly when off-screen
+    }
   }
 
   renderActiveTheme();
@@ -146,6 +194,15 @@ void clearCanvas() {
 int wipeFront(int maxDist) {
   float period = 1.0f + (float)maxDist;
   float raw    = fmod(themeClock * maxDist, period);
+  return (int)constrain(raw, 0, maxDist);
+}
+
+// Same as wipeFront(), but scales the clock by that row's compensation
+// factor so lagging rows can be nudged to keep pace with the rest.
+int wipeFrontForRow(int maxDist, int row) {
+  float rowClock = themeClock * rowSpeedComp[row];
+  float period    = 1.0f + (float)maxDist;
+  float raw       = fmod(rowClock * maxDist, period);
   return (int)constrain(raw, 0, maxDist);
 }
 
@@ -198,7 +255,7 @@ void applyCommand() {
       if (cmdValueIndex >= 1) {
         activeTheme = (ThemeID)constrain(cmdValues[0], 0, 11);
         themeClock  = 0;
-        if (activeTheme == THEME_TEXT_SCROLL) scrollPos = -LEDS_PER_ROW;
+        if (activeTheme == THEME_TEXT_SCROLL) scrollPos = LEDS_PER_ROW; 
       }
       if (cmdValueIndex >= 2) themeSpeed = constrain(cmdValues[1], 1, 10);
       break;
@@ -218,7 +275,7 @@ void applyCommand() {
 
     case 'T':
       activeTheme = THEME_TEXT_SCROLL;
-      scrollPos   = -LEDS_PER_ROW;
+      scrollPos   = LEDS_PER_ROW; 
       break;
 
     case 'X':
@@ -252,18 +309,20 @@ void renderStatic() {
 
 void renderWipeL() {
   clearCanvas();
-  int front = wipeFront(LEDS_PER_ROW);
-  for (int r = 0; r < NUM_ROWS; r++)
+  for (int r = 0; r < NUM_ROWS; r++) {
+    int front = wipeFrontForRow(LEDS_PER_ROW, r);
     for (int c = 0; c < front; c++)
       canvas[r][c] = CRGB(fgR, fgG, fgB);
+  }
 }
 
 void renderWipeR() {
   clearCanvas();
-  int front = wipeFront(LEDS_PER_ROW);
-  for (int r = 0; r < NUM_ROWS; r++)
+  for (int r = 0; r < NUM_ROWS; r++) {
+    int front = wipeFrontForRow(LEDS_PER_ROW, r);
     for (int c = LEDS_PER_ROW - front; c < LEDS_PER_ROW; c++)
       canvas[r][c] = CRGB(fgR, fgG, fgB);
+  }
 }
 
 void renderWipeT() {
@@ -284,9 +343,9 @@ void renderWipeB() {
 
 void renderDualH() {
   clearCanvas();
-  int half  = (LEDS_PER_ROW + 1) / 2;
-  int front = wipeFront(half);
+  int half = (LEDS_PER_ROW + 1) / 2;
   for (int r = 0; r < NUM_ROWS; r++) {
+    int front = wipeFrontForRow(half, r);
     for (int c = 0; c < front; c++)
       canvas[r][c] = CRGB(fgR, fgG, fgB);
     for (int c = LEDS_PER_ROW - front; c < LEDS_PER_ROW; c++)
@@ -324,26 +383,40 @@ void renderTextScroll() {
   clearCanvas();
   int textPixelWidth = scrollText.length() * CHAR_PITCH;
   if (textPixelWidth <= 0) return;
-  int loopWidth = textPixelWidth + LEDS_PER_ROW;
 
-  // Center the 7-pixel high font on the 18-pixel high row
-  int rowOffset = 5; 
+  const int glyphPixelWidth  = GLYPH_W * FONT_SCALE_X;   // e.g. 10
+  const int glyphPixelHeight = GLYPH_H * FONT_SCALE_Y;   // e.g. 14
 
   for (int c = 0; c < LEDS_PER_ROW; c++) {
-    int x       = (int)scrollPos + c;
-    int wrapped = x % loopWidth;
-    if (wrapped < 0) wrapped += loopWidth;
-    if (wrapped >= textPixelWidth) continue;
 
-    int charIdx   = wrapped / CHAR_PITCH;
-    int colInChar = wrapped % CHAR_PITCH;
-    if (colInChar >= 5) continue;
+    // Map physical column to logical text column depending on wiring
+    int logicalC = INVERT_X_AXIS ? (LEDS_PER_ROW - 1 - c) : c;
+    int fontCol  = logicalC - (int)scrollPos;
 
-    int glyphIndex = fontIndex(scrollText.charAt(charIdx));
-    for (int r = 0; r < 7; r++) {
-      bool lit = (FONT_5x7[glyphIndex][r] >> (4 - colInChar)) & 0x01;
-      // Add the offset to position the text centrally 
-      if (lit) canvas[r + rowOffset][c] = CRGB(fgR, fgG, fgB);
+    if (fontCol >= 0 && fontCol < textPixelWidth) {
+      int charIdx   = fontCol / CHAR_PITCH;
+      int colInChar = fontCol % CHAR_PITCH;
+
+      if (colInChar < glyphPixelWidth) {
+        int glyphIndex = fontIndex(scrollText.charAt(charIdx));
+        int bitCol     = colInChar / FONT_SCALE_X; // back to 0..4 in the base glyph
+
+        for (int r = 0; r < glyphPixelHeight; r++) {
+          int  bitRow = r / FONT_SCALE_Y; // back to 0..6 in the base glyph
+          bool lit    = (FONT_5x7[glyphIndex][bitRow] >> (4 - bitCol)) & 0x01;
+
+          if (lit) {
+            // Handle Y axis inversion (on the scaled glyph height)
+            int logicalR = INVERT_Y_AXIS ? (glyphPixelHeight - 1 - r) : r;
+            int finalRow = logicalR + TEXT_ROW_OFFSET;
+
+            // Strict boundary safeguard to prevent memory crashes
+            if (finalRow >= 0 && finalRow < NUM_ROWS) {
+              canvas[finalRow][c] = CRGB(fgR, fgG, fgB);
+            }
+          }
+        }
+      }
     }
   }
 }
