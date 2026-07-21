@@ -5,9 +5,6 @@
 #define LEDS_PER_ROW  508
 #define SERIAL_LINK   Serial1
 
-// =========================================================
-// 🛠️ MATRIX CONFIGURATION ZONE 
-// =========================================================
 #define INVERT_X_AXIS true  
 #define INVERT_Y_AXIS false  
 
@@ -16,7 +13,6 @@
 #define GLYPH_W       5
 #define GLYPH_H       7
 #define CHAR_SPACING  1
-#define TEXT_ROW_OFFSET 2    
 
 uint8_t rowPins[NUM_ROWS] = { 3, 5, 7, 9, 11, 24, 26, 28, 30, 32, 37, 39, 41, 14, 16, 18, 20, 22 };
 
@@ -25,7 +21,6 @@ float rowSpeedComp[NUM_ROWS] = {
   1.00, 1.00, 1.00, 1.00, 1.00, 
   1.00, 1.00, 1.00, 1.00, 1.00, 1.00
 };
-// =========================================================
 
 CRGB canvas[NUM_ROWS][LEDS_PER_ROW];
 ObjectFLED leds(NUM_ROWS * LEDS_PER_ROW, canvas, CORDER_GRB, NUM_ROWS, rowPins, 0);
@@ -56,10 +51,8 @@ String scrollText = "TINKERSPACE";
 float  scrollPos  = 0;
 const int CHAR_PITCH = (GLYPH_W + CHAR_SPACING) * FONT_SCALE_X;
 
-// --- GPU Sprite Data Stores ---
 #define PACMAN_SCALE 2
 float pacmanPos = 0; 
-
 const uint8_t PACMAN_CLOSED[8] = {
   0b01111000, 0b11111100, 0b11111111, 0b11111111,
   0b11111111, 0b11111111, 0b11111100, 0b01111000
@@ -75,61 +68,25 @@ float dinoY      = 0.0f;
 bool  isJumping  = false;
 float cactusPos[3] = { 508.0f, 658.0f, 808.0f }; 
 int   dinoScore  = 0;
-int   dinoLives  = 3; // Kept in memory, removed from matrix UI display
+int   dinoLives  = 3;
 
-// 🔥 DINO SPRITES SHRUNK BY 1PX ALL DIRECTIONS
 const uint16_t DINO_JUMP[10] = {
-  0b0000000000,
-  0b0000011110,
-  0b0000010111,
-  0b0000011111,
-  0b0000011100,
-  0b0010111110,
-  0b0111111110,
-  0b0011111000,
-  0b0001001000,
-  0b0011001100
+  0b0000000000, 0b0000011110, 0b0000010111, 0b0000011111, 0b0000011100,
+  0b0010111110, 0b0111111110, 0b0011111000, 0b0001001000, 0b0011001100
 };
 const uint16_t DINO_RUN1[10] = {
-  0b0000000000,
-  0b0000011110,
-  0b0000010111,
-  0b0000011111,
-  0b0000011100,
-  0b0010111110,
-  0b0111111110,
-  0b0011111000,
-  0b0001000000,
-  0b0001101100
+  0b0000000000, 0b0000011110, 0b0000010111, 0b0000011111, 0b0000011100,
+  0b0010111110, 0b0111111110, 0b0011111000, 0b0001000000, 0b0001101100
 };
 const uint16_t DINO_RUN2[10] = {
-  0b0000000000,
-  0b0000011110,
-  0b0000010111,
-  0b0000011111,
-  0b0000011100,
-  0b0010111110,
-  0b0111111110,
-  0b0011111000,
-  0b0000001000,
-  0b0011001000
+  0b0000000000, 0b0000011110, 0b0000010111, 0b0000011111, 0b0000011100,
+  0b0010111110, 0b0111111110, 0b0011111000, 0b0000001000, 0b0011001000
 };
-
-// 🔥 CACTUS SPRITE SHRUNK BY 2PX ALL DIRECTIONS (Now 6x6)
 const uint16_t DINO_CACTUS[10] = {
-  0b0000000000,
-  0b0000000000,
-  0b0000000000,
-  0b0000000000,
-  0b0000110000,
-  0b0010110100,
-  0b0011111100,
-  0b0000110000,
-  0b0000110000,
-  0b0000110000
+  0b0000000000, 0b0000000000, 0b0000000000, 0b0000000000, 0b0000110000,
+  0b0010110100, 0b0011111100, 0b0000110000, 0b0000110000, 0b0000110000
 };
 
-// --- UART Data Parsers ---
 char   packetType = '\0';
 String currentToken = "";
 bool   recvInProgress = false;
@@ -174,13 +131,6 @@ const uint8_t FONT_5x7[][7] = {
   {0b11111,0b00001,0b00010,0b00100,0b01000,0b01000,0b01000}, // 7
   {0b01110,0b10001,0b10001,0b01110,0b10001,0b10001,0b01110}, // 8
   {0b01110,0b10001,0b10001,0b01111,0b00001,0b00010,0b01100}, // 9
-  {0b00000,0b00000,0b00000,0b00000,0b00000,0b01100,0b01100}, // .
-  {0b00000,0b00000,0b00000,0b00000,0b00000,0b01100,0b01000}, // ,
-  {0b00100,0b00100,0b00100,0b00100,0b00100,0b00000,0b00100}, // !
-  {0b01110,0b10001,0b00001,0b00010,0b00100,0b00000,0b00100}, // ?
-  {0b00000,0b01100,0b01100,0b00000,0b01100,0b01100,0b00000}, // :
-  {0b00000,0b00000,0b00000,0b11111,0b00000,0b00000,0b00000}, // -
-  {0b00100,0b00100,0b01000,0b00000,0b00000,0b00000,0b00000}, // '
 };
 
 char toUpperManual(char c) {
@@ -193,15 +143,9 @@ int fontIndex(char c) {
   if (c == ' ') return 0;
   if (c >= 'A' && c <= 'Z') return 1 + (c - 'A');
   if (c >= '0' && c <= '9') return 27 + (c - '0');
-  switch (c) {
-    case '.':  return 37; case ',':  return 38; case '!':  return 39;
-    case '?':  return 40; case ':':  return 41; case '-':  return 42;
-    case '\'': return 43;
-  }
   return 0;
 }
 
-// Fixed-position 1x scale string drawing for HUD overlays
 void drawString(String s, int x, int y, CRGB color) {
   for (unsigned int i = 0; i < s.length(); i++) {
     int charIdx = fontIndex(s.charAt(i));
@@ -339,16 +283,8 @@ void applyCommand() {
       }
       break;
 
-    case 'T':
-      activeTheme = THEME_TEXT_SCROLL;
-      scrollPos   = LEDS_PER_ROW; 
-      break;
-
     case 'X':
       clearCanvas();
-      leds.show();
-      activeTheme = THEME_STATIC;
-      fgR = 0; fgG = 0; fgB = 0;
       break;
 
     case 'F': 
@@ -488,7 +424,7 @@ void renderTextScroll() {
 
           if (lit) {
             int logicalR = INVERT_Y_AXIS ? (glyphPixelHeight - 1 - r) : r;
-            int finalRow = logicalR + TEXT_ROW_OFFSET;
+            int finalRow = logicalR + 2;
 
             if (finalRow >= 0 && finalRow < NUM_ROWS) {
               canvas[finalRow][c] = CRGB(fgR, fgG, fgB);
@@ -529,22 +465,18 @@ void renderPacman() {
 void renderDino() {
   clearCanvas();
 
-  // Matrix HUD: Draw Score directly to LEDs (Top Row)
+  // HUD: Display Score and Game Over state using data streamed from ESP32
   drawString("SCORE " + String(dinoScore), 10, 0, CRGB(fgR, fgG, fgB));
-  
   if (dinoState == 2) {
-    // GAME OVER Screen in dead center
     drawString("GAME OVER", 230, 6, CRGB(255, 0, 0));
   }
 
-  // Draw Ground Plane
   CRGB groundColor = CRGB(fgR, fgG, fgB);
   groundColor.fadeToBlackBy(180);
   for (int c = 0; c < LEDS_PER_ROW; c++) {
     canvas[17][c] = groundColor;
   }
 
-  // Draw Cactuses (Skip rendering if Game Over overlay is up)
   if (dinoState != 2) {
     for (int i = 0; i < 3; i++) {
       int cx = (int)cactusPos[i];
@@ -564,12 +496,11 @@ void renderDino() {
     }
   }
 
-  // Draw Dino (Blink him if he just crashed)
   if (dinoState == 1 && ((millis() / 200) % 2 == 0)) {
-    // Leave blank for blinking effect
+    // Blinking effect on crash
   } else if (dinoState != 2) {
     const uint16_t* dFrame;
-    if (isJumping || dinoState == 1) { // Freeze run frame mid-air or mid-crash
+    if (isJumping || dinoState == 1) { 
       dFrame = DINO_JUMP;
     } else {
       dFrame = ((millis() / 100) % 2 == 0) ? DINO_RUN1 : DINO_RUN2;
