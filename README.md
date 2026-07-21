@@ -138,3 +138,206 @@ void clearCanvas() {
     for (int c = 0; c < LEDS_PER_ROW; c++)
       canvas[r][c] = CRGB::Black;
 }
+```
+
+### 8. Capacitive Crosstalk on Parallel Data Lines
+*   **Symptom:** Lighting one column caused both adjacent columns to flicker with random colors intermittently. Row operations were clean; column operations were not.
+*   **Root Cause:** 800kHz WS2812B edges (~150ns rise/fall) capacitively couple onto physically parallel wires. Teensy 4.1 outputs 3.3V logic; WS2812B guaranteed logic-high threshold is 3.5V at 5V supply — signal already marginal, making it more susceptible to coupled noise. Interference was non-deterministic because it depended on instantaneous rail voltage and contact resistance.
+*   **Diagnosis:** Added `delay(20)` settling pause between clear and show. Interference reduced significantly, confirming power rail transients as a contributing factor.
+*   **Resolution:** 330Ω series resistor on each data line at Teensy pin end. GND wire interleaved between every data line in the bundle. 100µF electrolytic at power entry point. 100nF ceramic cap per strip at VCC/GND pads.
+
+### 9. Reverse Polarity — Full Matrix Failure
+*   **Symptom:** VCC/GND briefly swapped. After correction, entire 9-row matrix went dark with no visible physical damage.
+*   **Root Cause:** WS2812B has no reverse-polarity protection. Damaged chip failed shorted (not open), pulling the shared 5V rail to near-zero and killing all rows simultaneously.
+*   **Diagnosis:** Multimeter in resistance mode across each strip's VCC/GND pads with power off. Shorted strip reads near-0Ω; healthy strips read high impedance.
+*   **Resolution:** Cut strip at damaged pixel boundaries. Soldered jumper from upstream `DO/GND/5V` pads directly to downstream `DIN/GND/5V` pads, bypassing the dead chip. Matrix restored with one pixel position sacrificed.
+
+### 10. Row 2 Dark After Polarity Repair
+*   **Symptom:** After bypass, row index 2 remained completely dark while all other rows responded.
+*   **Root Cause:** Polarity event destroyed the data input of the first pixel on that strip, breaking the chain for the entire row. Same bypass procedure applied to that strip. Pin array remapped to `{ 3, 5, 7, 9, 11, 24, 26, 28, 30 }` after finding original assignments conflicted with Teensy internal peripherals on several pins.
+*   **Resolution:** Same DIN bypass as above on row 2 strip. Confirmed working via row scan debug mode.
+
+### Serial Protocol
+
+| Packet | Format | Action |
+|---|---|---|
+| Static color | `<S,r,g,b>` | Set foreground color |
+| Theme + speed | `<A,mode,speed>` | Switch theme 0–10, speed 1–10 |
+| Brightness | `<B,val>` | Live brightness 0–255 |
+| Single pixel | `<P,row,col>` | Light one pixel at coordinates |
+| Clear | `<X>` | All pixels off immediately |
+
+### Theme Library (Phase 3)
+Speed range 1–10. Internal multiplier: `speedMult = 0.05 + (speed-1) × (1.95/9)`. Speed 1 = 5% rate for debug observation. Speed 10 = 200% rate.
+
+| ID | Name | Behaviour |
+|---|---|---|
+| 0 | Static Fill | Solid foreground color, full matrix |
+| 1 | Wipe Left | Fills from left edge, holds, resets |
+| 2 | Wipe Right | Fills from right edge |
+| 3 | Wipe Top | Fills from top row downward |
+| 4 | Wipe Bottom | Fills from bottom row upward |
+| 5 | Row Scan | One row at a time, prints row index and pin to Serial |
+| 6 | Col Scan | One column at a time, prints column index to Serial |
+| 7 | Dual H Sync | Left and right meet at center column |
+| 8 | Dual V Sync | Top and bottom meet at center row |
+| 9 | All Sides | All four edges converge inward as concentric rings |
+| 10 | Single Pixel | One pixel via `<P,row,col>` |
+
+### ESP32 Dashboard
+*   **WiFi AP:** `TinkerMatrix` / `tinker123` — open `192.168.4.1`
+*   **Controls:** Theme selector, speed slider (1–10, labelled debug-slow at minimum), brightness slider, color picker, preset color buttons (R/G/B/W), 9×10 interactive pixel grid showing `row,col` on each cell for individual pixel toggling, Clear All button.
+
+---
+
+## Summary — Phase 3
+
+| Layer | Component | Role |
+|---|---|---|
+| Network | ESP32 WiFi AP + WebServer | Hosts dashboard, forwards 5 command types |
+| Link | UART Serial1 115200 | `<...>` framed packets |
+| Rendering | Teensy 4.1 + ObjectFLED DMA | 2D canvas, 10 themes, 9-lane parallel output |
+| Output | 9×10 WS2812B matrix | Test rig, 90 pixels, all themes validated |
+
+---
+
+## Phase 4 — Scrolling Text & Speed Tuning
+
+### Overview
+Added on-the-fly scrolling text rendering to the matrix without reflashing either board. Text content and scroll speed are set entirely from the dashboard over Wi-Fi. A hand-built 5×7 pixel font is rendered directly on the Teensy framebuffer, vertically centered in the 9-row display.
+
+### Feature — Scrolling Text Engine
+A new theme (ID 11) renders an arbitrary ASCII message as a continuously looping horizontal marquee. The font and scroll engine are implemented entirely on the Teensy; the ESP32 acts only as a relay.
+
+*   **Font:** 5×7 bitmap, hand-defined per glyph. Supports A–Z, 0–9, and punctuation (`. , ! ? : - '`). Each character occupies 5 pixel columns with a 1-column blank gap (pitch = 6). The 7-row glyph is vertically centered with 1 blank row above and below within the 9-row display, exploiting the tighter vertical LED spacing for maximum readability.
+*   **Scroll speed:** Decoupled from the general theme speed multiplier. Maps speed slider 1–10 linearly to 1–20 px/sec, giving a readable slow crawl at minimum and a fast marquee at maximum without modifying any other theme's timing.
+*   **Loop behaviour:** Text scrolls fully off the left edge before restarting from the right. A blank gap equal to one screen width separates the end of the message from the next loop, preventing visual wrap-collision.
+
+### Serial Protocol Addition
+
+| Packet | Format | Action |
+|---|---|---|
+| Scroll text | `<T,MESSAGE>` | Set message string and switch to theme 11 |
+
+*   Message is passed as raw ASCII (uppercase enforced by ESP32 before transmission).
+*   Unsupported characters are substituted with a blank space by the ESP32 before the packet is sent.
+*   Maximum message length: 60 characters.
+*   The `<T,...>` parser on the Teensy uses a dedicated raw-text capture path, completely isolated from the existing numeric tokenizer used by all other packet types.
+
+### Dashboard Addition
+A **Scrolling Text** card was added below the Color card:
+*   Free-text input field (max 60 chars).
+*   **"Scroll This Text"** button — sets theme dropdown to 11, sends `<A,11,speed>` followed by `<T,MESSAGE>`.
+*   Speed and Brightness sliders apply to scroll text identically to all other themes — no new controls required.
+*   Character set note displayed inline below the input field.
+
+### 11. Scroll Speed Ceiling Too Low
+*   **Symptom:** At speed 10 the marquee was readable but not noticeably fast; no visible "high speed" effect on the physical matrix.
+*   **Root Cause:** Original speed mapping capped scroll rate at 8 px/sec, which on a 10-column display produces only moderate motion.
+*   **Resolution:** Raised speed ceiling from 8 px/sec to 20 px/sec by adjusting the scroll speed multiplier constant:
+```cpp
+// Before
+float scrollSpeedPxPerSec = 1.0f + (themeSpeed - 1) * (7.0f / 9.0f);
+
+// After
+float scrollSpeedPxPerSec = 1.0f + (themeSpeed - 1) * (19.0f / 9.0f);
+```
+Minimum (speed 1) unchanged at 1 px/sec.
+
+---
+
+## Summary — Phase 4
+
+| Layer | Component | Role |
+|---|---|---|
+| Network | ESP32 WiFi AP + WebServer | Sanitizes and forwards text packets, hosts updated dashboard |
+| Link | UART Serial1 115200 | `<T,...>` raw-text packets alongside existing numeric protocol |
+| Rendering | Teensy 4.1 + ObjectFLED DMA | 5×7 font engine, scroll position accumulator, theme 11 dispatch |
+| Output | 9×10 WS2812B matrix | Scrolling text confirmed readable at all speeds 1–10 |
+
+---
+
+## Phase 5 — The Massive Matrix (18x508)
+
+### Overview
+Scaled the project from the 9x10 test rig to the final, full-scale TinkerSpace wall. The new hardware profile is a colossal 18 rows by 508 columns, totaling 9,144 WS2812B LEDs. This phase required massive structural re-tuning for power limits, data speed parity, and layout orientation.
+
+### Hardware Configuration & Power Management
+
+| Parameter | Value |
+|---|---|
+| Matrix Dimensions | 18 rows × 508 LEDs |
+| Total Pixel Count | 9,144 |
+| Teensy Data Pins | `3, 5, 7, 9, 11, 24, 26, 28, 30, 32, 37, 39, 41, 14, 16, 18, 20, 22` |
+| Master Power Supply | 5V / 80A |
+
+**Power Constraints:** Driving 9,144 LEDs at full white requires hundreds of amps, drastically exceeding the 80A power supply. To prevent PSU overcurrent tripping or fire hazards, software-enforced brightness capping was implemented. The maximum global brightness is constrained strictly to 35 (out of 255).
+
+### Core Architecture Enhancements
+
+#### 1. Per-Row Speed Compensation
+*   **Challenge:** Resistance and voltage sag on longer wiring segments for specific row pins caused those strips to lag visibly behind others during full-panel sweeps.
+*   **Solution:** Implemented a float array `rowSpeedComp[NUM_ROWS]` to act as an independent clock multiplier for each row. Lagging rows are nudged up (e.g., 1.02 to 1.10) allowing them to "catch up" mathematically and maintain visual sync across the 18-row wipe animations.
+
+#### 2. Physical Axis Inversion flags
+*   **Challenge:** Physical wiring orientation resulted in text scrolling backwards or rendering upside down.
+*   **Solution:** Added preprocessor definitions `INVERT_X_AXIS` and `INVERT_Y_AXIS`. The rendering loop dynamically maps logical coordinate planes to the physical output, ensuring animations enter from the correct edge without requiring physical rewiring.
+
+#### 3. Font Scaling & Dynamic Centering
+*   **Challenge:** The 5x7 test-rig font looked tiny on an 18-row matrix.
+*   **Solution:** Added `FONT_SCALE_X` and `FONT_SCALE_Y` constants to scale the binary font mapping to 2x2. The resulting 10x14 text is centered via a `TEXT_ROW_OFFSET`, leaving equal padding above and below.
+
+---
+
+## Summary — Phase 5
+
+| Layer | Component | Role |
+|---|---|---|
+| Network | ESP32 WiFi AP + WebServer | Serves UI, enforces constraints |
+| Link | UART Serial1 115200 | Reliable framing maintained |
+| Rendering | Teensy 4.1 + ObjectFLED | Drives 18 parallel strips; processes sub-pixel rendering and font scaling |
+| Output | 18×508 WS2812B matrix | Full TinkerSpace deployment, 9,144 LEDs, hardware compensated |
+
+---
+
+## Phase 6 — Sprite Engines & Autonomous Games
+
+### Overview
+Introduced dynamic, sprite-based themes to the massive matrix. Removed diagnostic row/column themes (IDs 5, 6, 10) to declutter the dashboard, replacing them with classic arcade animations and autonomous game physics.
+
+### Feature — Sprite Engines & Game Themes
+
+#### Pac-Man Loop (Theme 12)
+*   Renders an 8x8 sprite (scaled to 16x16) that continuously wraps around the 508-column width.
+*   Mouth animation alternates between open/closed frames synchronously tied to `millis()` (150ms cadence), operating completely independently of the movement speed.
+
+#### Chrome Dino Game (Theme 13)
+*   Self-playing emulation of the classic offline dinosaur game.
+*   Employs 10x10 sprites (drawn from `uint16_t` arrays) for the Dino and Cactuses.
+*   **Auto-Jump Physics Engine:** Cactuses spawn off-screen and scroll left. The logic calculates a `jumpTriggerDist` dynamically based on the current `gameSpeed` slider. Once a cactus enters the calculated danger zone, the system injects vertical velocity (`dinoVy`), smoothly overriding the running animation with a jumping state until gravity returns the sprite to the "floor" plane.
+
+### Updated Theme Library (Final)
+
+| ID | Name | Behaviour |
+|---|---|---|
+| 0 | Solid Fill | Solid foreground color, full matrix |
+| 1 | Wipe ← Left | Fills from left edge, holds, resets |
+| 2 | Wipe Right → | Fills from right edge |
+| 3 | Wipe ↓ Top | Fills from top row downward |
+| 4 | Wipe ↑ Bottom | Fills from bottom row upward |
+| 7 | Dual Sync ←→ | Left and right meet at center column |
+| 8 | Dual Sync ↕ | Top and bottom meet at center row |
+| 9 | All Sides | All four edges converge inward as concentric rings |
+| 11 | Scroll Text | Scaled 10x14 marquee, custom message via `<T,...>` |
+| 12 | Pac-Man Loop | 16x16 animated sprite wrapping horizontally |
+| 13 | Chrome Dino | Procedurally generating, auto-playing physics game |
+
+---
+
+## Summary — Phase 6
+
+| Layer | Component | Role |
+|---|---|---|
+| Network | ESP32 WiFi AP + WebServer | Exposes game theme selection to the dashboard |
+| Hardware | Teensy 4.1 | Processes autonomous physics calculations, sprite rendering, and gravity parameters |
+| Output | 18×508 WS2812B matrix | Displays complex multi-layered sprite animations smoothly |
