@@ -26,7 +26,7 @@ volatile uint8_t activeThemeID = 11;
 volatile uint8_t activeSpeed   = 3;
 volatile bool    resetGame     = false;
 
-// Play Mode Flags: 0 = Manual Control, 1 = Full Automatic Looprun with Color Cycling
+// Play Mode Flags: 0 = Manual Control (3 tries), 1 = Full Automatic Infinite Looprun
 volatile uint8_t dinoPlayMode  = 1; 
 volatile bool    manualJump    = false;
 
@@ -80,7 +80,6 @@ const char PAGE[] PROGMEM = R"rawliteral(
   <div class="theme-grid" id="themeGrid"></div>
 </div>
 
-<!-- DINO CONTROLS & MODE SELECTOR CARD -->
 <div class="card" id="dinoCard" style="display:none; text-align:center;">
   <div class="label">Chrome Dino Controls</div>
   <div class="row2" style="margin-top:8px; margin-bottom:8px;">
@@ -229,9 +228,6 @@ function setPreset(r, g, b) {
 function sendScrollText() {
   let msg = document.getElementById('scrollMsg').value;
   if (!msg) { setStatus('Type a message first'); return; }
-  activeTheme = 11;
-  markActive(11);
-  document.getElementById('dinoCard').style.display = 'none';
   send('/text?msg=' + encodeURIComponent(msg)).then(() => setStatus('Scrolling...'));
 }
 
@@ -325,15 +321,7 @@ void handleText() {
   if (!server.hasArg("msg")) { server.send(400, "text/plain", "missing msg"); return; }
   String msg = server.arg("msg");
   msg.toUpperCase();
-  String safe = "";
-  for (unsigned int i = 0; i < msg.length(); i++) {
-    char c = msg[i];
-    bool ok = (c==' ') || (c>='A'&&c<='Z') || (c>='0'&&c<='9') ||
-              c=='.'||c==','||c=='!'||c=='?'||c==':'||c=='-'||c=='\'';
-    safe += ok ? c : ' ';
-  }
-  if (safe.length() > 60) safe = safe.substring(0, 60);
-  String out = "<T," + safe + ">\n";
+  String out = "<T," + msg + ">\n";
   
   xSemaphoreTake(uartMutex, portMAX_DELAY);
   teensySerial.print(out); 
@@ -383,18 +371,10 @@ void TaskCore1_GameEngine(void *pvParameters) {
   int dinoState = 0; // 0=PLAYING, 1=CRASHED, 2=GAME_OVER
   float stateTimer = 0;
 
-  // Color Cycling Palette (10 distinct RGB colors, each shifting every 10 seconds)
+  // Color Cycling Palette (10 distinct RGB colors, 10 seconds each)
   const uint8_t colorPalette[10][3] = {
-    {0, 200, 255},  // Cyan
-    {0, 255, 100},  // Spring Green
-    {255, 255, 0},  // Yellow
-    {255, 128, 0},  // Orange
-    {255, 0, 128},  // Magenta-Pink
-    {128, 0, 255},  // Purple
-    {0, 255, 255},  // Electric Aqua
-    {255, 0, 0},    // Red
-    {0, 255, 0},    // Pure Green
-    {0, 128, 255}   // Sky Blue
+    {0, 200, 255}, {0, 255, 100}, {255, 255, 0}, {255, 128, 0}, {255, 0, 128},
+    {128, 0, 255}, {0, 255, 255}, {255, 0, 0}, {0, 255, 0}, {0, 128, 255}
   };
   float colorTimer = 0;
   int colorIndex = 0;
@@ -410,8 +390,8 @@ void TaskCore1_GameEngine(void *pvParameters) {
       dinoVy = 0.0f;
       isJumping = false;
       cactusPos[0] = 508.0f;
-      cactusPos[1] = 658.0f;
-      cactusPos[2] = 808.0f;
+      cactusPos[1] = cactusPos[0] + (float)random(120, 250);
+      cactusPos[2] = cactusPos[1] + (float)random(120, 250);
       dinoScore = 0;
       dinoLives = 3;
       scoreAccum = 0;
@@ -437,8 +417,8 @@ void TaskCore1_GameEngine(void *pvParameters) {
     else if (mode == 13) { // Dino
       float gameSpeed = 50.0f + (speed - 1) * (180.0f / 9.0f);
 
-      // Handle Automatic Color Cycling (10 colors, 10 seconds each)
       if (dinoPlayMode == 1) {
+        // Full Auto Mode: Infinite Looprun, Auto-Jump, Color Cycling every 10s
         colorTimer += dt;
         if (colorTimer >= 10.0f) {
           colorTimer = 0;
@@ -447,105 +427,126 @@ void TaskCore1_GameEngine(void *pvParameters) {
           teensySerial.printf("<S,%d,%d,%d>\n", colorPalette[colorIndex][0], colorPalette[colorIndex][1], colorPalette[colorIndex][2]);
           xSemaphoreGive(uartMutex);
         }
-      }
-      
-      if (dinoState == 0) { // PLAYING
-        // 1. Scoring
+
         scoreAccum += dt * (gameSpeed / 10.0f);
         if (scoreAccum >= 1.0f) {
             dinoScore += (int)scoreAccum;
             scoreAccum -= (int)scoreAccum;
         }
 
-        // 2. Cactus Scrolling
         for (int i = 0; i < 3; i++) {
           cactusPos[i] -= dt * gameSpeed;
           if (cactusPos[i] < -20.0f) {
             float maxC = 508.0f;
             for (int j = 0; j < 3; j++) { if (cactusPos[j] > maxC) maxC = cactusPos[j]; }
-            cactusPos[i] = maxC + random(80, 250);
+            cactusPos[i] = maxC + (float)random(100, 280); // Random Gap
           }
         }
 
-        // 3. Collision Hitbox Detection
-        bool hit = false;
-        for (int i = 0; i < 3; i++) {
-          if (cactusPos[i] < 46.0f && cactusPos[i] > 36.0f) { 
-            if (dinoY < 6.0f) { 
-              hit = true;
+        if (!isJumping) {
+          float jumpTriggerDist = gameSpeed * 0.42f; 
+          for (int i = 0; i < 3; i++) {
+            if (cactusPos[i] > 40.0f && cactusPos[i] < 40.0f + jumpTriggerDist) {
+              isJumping = true;
+              dinoVy = 45.0f; 
               break;
             }
           }
         }
 
-        if (hit) {
-          dinoLives--;
-          if (dinoLives <= 0) {
-            dinoState = 2; // GAME OVER
-            stateTimer = 4.0f; 
-          } else {
-            dinoState = 1; // CRASHED
-            stateTimer = 2.0f; 
+        if (isJumping) {
+          dinoY += dinoVy * dt;
+          dinoVy -= 110.0f * dt; 
+          if (dinoY <= 0.0f) {
+            dinoY = 0.0f;
+            isJumping = false;
+            dinoVy = 0.0f;
           }
-        } else {
-          // 4. Jump & Control Physics
-          if (!isJumping) {
-            if (dinoPlayMode == 0) {
-              // Manual Mode Processing
+        }
+
+        dinoState = 0; // Infinite loop state
+      } 
+      else { 
+        // Manual Mode (0): 3 Tries, Hitboxes, Scoring, Game Over states
+        if (dinoState == 0) { 
+          scoreAccum += dt * (gameSpeed / 10.0f);
+          if (scoreAccum >= 1.0f) {
+              dinoScore += (int)scoreAccum;
+              scoreAccum -= (int)scoreAccum;
+          }
+
+          for (int i = 0; i < 3; i++) {
+            cactusPos[i] -= dt * gameSpeed;
+            if (cactusPos[i] < -20.0f) {
+              float maxC = 508.0f;
+              for (int j = 0; j < 3; j++) { if (cactusPos[j] > maxC) maxC = cactusPos[j]; }
+              cactusPos[i] = maxC + (float)random(100, 280); // Random Gap
+            }
+          }
+
+          bool hit = false;
+          for (int i = 0; i < 3; i++) {
+            if (cactusPos[i] < 46.0f && cactusPos[i] > 36.0f) { 
+              if (dinoY < 6.0f) { 
+                hit = true;
+                break;
+              }
+            }
+          }
+
+          if (hit) {
+            dinoLives--;
+            if (dinoLives <= 0) {
+              dinoState = 2; // GAME OVER
+              stateTimer = 4.0f; 
+            } else {
+              dinoState = 1; // CRASHED
+              stateTimer = 2.0f; 
+            }
+          } else {
+            if (!isJumping) {
               if (manualJump) {
                 isJumping = true;
                 dinoVy = 45.0f; 
                 manualJump = false; 
               }
-            } 
-            else {
-              // Full Automatic Mode Processing (AI auto-plays)
-              float jumpTriggerDist = gameSpeed * 0.42f; 
-              for (int i = 0; i < 3; i++) {
-                if (cactusPos[i] > 40.0f && cactusPos[i] < 40.0f + jumpTriggerDist) {
-                  isJumping = true;
-                  dinoVy = 45.0f; 
-                  break;
-                }
+            } else {
+              manualJump = false; 
+            }
+            
+            if (isJumping) {
+              dinoY += dinoVy * dt;
+              dinoVy -= 110.0f * dt; 
+              if (dinoY <= 0.0f) {
+                dinoY = 0.0f;
+                isJumping = false;
+                dinoVy = 0.0f;
               }
             }
-          } else {
-            manualJump = false; 
           }
-          
-          if (isJumping) {
-            dinoY += dinoVy * dt;
-            dinoVy -= 110.0f * dt; 
-            if (dinoY <= 0.0f) {
-              dinoY = 0.0f;
-              isJumping = false;
-              dinoVy = 0.0f;
-            }
+        } 
+        else if (dinoState == 1) { 
+          stateTimer -= dt;
+          if (stateTimer <= 0) {
+            cactusPos[0] = 508.0f; cactusPos[1] = 658.0f; cactusPos[2] = 808.0f;
+            dinoY = 0.0f; isJumping = false; dinoVy = 0.0f;
+            dinoState = 0; 
           }
-        }
-      } 
-      else if (dinoState == 1) { // CRASHED / PAUSED
-        stateTimer -= dt;
-        if (stateTimer <= 0) {
-          cactusPos[0] = 508.0f; cactusPos[1] = 658.0f; cactusPos[2] = 808.0f;
-          dinoY = 0.0f; isJumping = false; dinoVy = 0.0f;
-          dinoState = 0; 
-        }
-      } 
-      else if (dinoState == 2) { // GAME OVER
-        stateTimer -= dt;
-        if (stateTimer <= 0) {
-          dinoScore = 0;
-          dinoLives = 3;
-          scoreAccum = 0;
-          cactusPos[0] = 508.0f; cactusPos[1] = 658.0f; cactusPos[2] = 808.0f;
-          dinoY = 0.0f; isJumping = false; dinoVy = 0.0f;
-          dinoState = 0; 
+        } 
+        else if (dinoState == 2) { 
+          stateTimer -= dt;
+          if (stateTimer <= 0) {
+            dinoScore = 0;
+            dinoLives = 3;
+            scoreAccum = 0;
+            cactusPos[0] = 508.0f; cactusPos[1] = 658.0f; cactusPos[2] = 808.0f;
+            dinoY = 0.0f; isJumping = false; dinoVy = 0.0f;
+            dinoState = 0; 
+          }
         }
       }
 
       xSemaphoreTake(uartMutex, portMAX_DELAY);
-      // Stream sub-pixel physics coordinates & score data (Lives tracked silently in background)
       teensySerial.printf("<F,%d,%d,%d,%d,%d,%d,%d,%d>\n", 
         dinoState, (int)dinoY, isJumping ? 1 : 0, 
         (int)cactusPos[0], (int)cactusPos[1], (int)cactusPos[2],
@@ -586,7 +587,8 @@ void setup() {
   xTaskCreatePinnedToCore(TaskCore0_Network, "NetworkTask", 8192, NULL, 1, &NetworkTaskHandle, 0);
   xTaskCreatePinnedToCore(TaskCore1_GameEngine, "GameTask", 8192, NULL, 2, &GameTaskHandle, 1);
 
-  delay(500); 
+  // 🚀 Startup Welcome Text Sequence
+  delay(500);
   xSemaphoreTake(uartMutex, portMAX_DELAY);
   teensySerial.print("<A,11,3>\n"); 
   teensySerial.print("<T,WELCOME TO TINKERSPACE>\n");
