@@ -26,8 +26,8 @@ volatile uint8_t activeThemeID = 11;
 volatile uint8_t activeSpeed   = 3;
 volatile bool    resetGame     = false;
 
-// New Player Control Flags
-volatile bool    autoPlayDino  = true;
+// Play Mode Flags: 0 = Manual Control, 1 = Full Automatic Looprun with Color Cycling
+volatile uint8_t dinoPlayMode  = 1; 
 volatile bool    manualJump    = false;
 
 // ---------- Dashboard page (served from flash) ----------
@@ -80,11 +80,14 @@ const char PAGE[] PROGMEM = R"rawliteral(
   <div class="theme-grid" id="themeGrid"></div>
 </div>
 
-<!-- DINO CONTROLS CARD -->
+<!-- DINO CONTROLS & MODE SELECTOR CARD -->
 <div class="card" id="dinoCard" style="display:none; text-align:center;">
-  <div class="label">Game Controls</div>
-  <button style="background:#ff0055; color:#fff; font-size:24px; padding:20px; border-radius:12px; margin-top:10px;" onclick="sendJump()">🦖 JUMP!</button>
-  <p style="font-size:11px; color:#666; margin-top:12px;">Auto-play disables instantly on first tap.</p>
+  <div class="label">Chrome Dino Controls</div>
+  <div class="row2" style="margin-top:8px; margin-bottom:8px;">
+    <button id="modeManualBtn" onclick="setDinoMode(0)" style="background:#222230; color:#00c8d4; border:1px solid #00c8d4;">Manual</button>
+    <button id="modeAutoBtn" onclick="setDinoMode(1)" style="background:#00c8d4; color:#0d0d12;">Full Auto</button>
+  </div>
+  <button id="jumpBtn" style="background:#ff0055; color:#fff; font-size:22px; padding:16px; border-radius:12px; display:none;" onclick="sendJump()">🦖 JUMP!</button>
 </div>
 
 <div class="card">
@@ -174,6 +177,26 @@ function selectTheme(id) {
   sendTheme();
 }
 
+function setDinoMode(mode) {
+  fetch('/dinoMode?mode=' + mode).then(r => r.text()).then(() => {
+    if (mode === 0) {
+      document.getElementById('modeManualBtn').style.background = '#00c8d4';
+      document.getElementById('modeManualBtn').style.color = '#0d0d12';
+      document.getElementById('modeAutoBtn').style.background = '#222230';
+      document.getElementById('modeAutoBtn').style.color = '#00c8d4';
+      document.getElementById('jumpBtn').style.display = 'block';
+      setStatus('Manual Play Mode Active');
+    } else {
+      document.getElementById('modeAutoBtn').style.background = '#00c8d4';
+      document.getElementById('modeAutoBtn').style.color = '#0d0d12';
+      document.getElementById('modeManualBtn').style.background = '#222230';
+      document.getElementById('modeManualBtn').style.color = '#00c8d4';
+      document.getElementById('jumpBtn').style.display = 'none';
+      setStatus('Full Auto Looprun Active');
+    }
+  });
+}
+
 function sendTheme() {
   let s = document.getElementById('speed').value;
   send('/setAnim?mode=' + activeTheme + '&speed=' + s);
@@ -199,7 +222,7 @@ function sendColor() {
 
 function setPreset(r, g, b) {
   document.getElementById('color').value = rgbToHex(r, g, b);
-  send('/set?r='+r+'&g='+g+'&b='+b);
+  send('/set?r='+r+'&g='+r+'&b='+b);
   setStatus('Preset applied');
 }
 
@@ -256,9 +279,19 @@ void handleSetAnim() {
   server.send(200, "text/plain", "OK");
 }
 
+void handleDinoMode() {
+  if (server.hasArg("mode")) {
+    dinoPlayMode = server.arg("mode").toInt();
+    server.send(200, "text/plain", "OK");
+  } else {
+    server.send(400, "text/plain", "Missing mode");
+  }
+}
+
 void handleJump() {
-  autoPlayDino = false; 
-  manualJump = true;
+  if (dinoPlayMode == 0) {
+    manualJump = true;
+  }
   server.send(200, "text/plain", "JUMP");
 }
 
@@ -350,6 +383,22 @@ void TaskCore1_GameEngine(void *pvParameters) {
   int dinoState = 0; // 0=PLAYING, 1=CRASHED, 2=GAME_OVER
   float stateTimer = 0;
 
+  // Color Cycling Palette (10 distinct RGB colors, each shifting every 10 seconds)
+  const uint8_t colorPalette[10][3] = {
+    {0, 200, 255},  // Cyan
+    {0, 255, 100},  // Spring Green
+    {255, 255, 0},  // Yellow
+    {255, 128, 0},  // Orange
+    {255, 0, 128},  // Magenta-Pink
+    {128, 0, 255},  // Purple
+    {0, 255, 255},  // Electric Aqua
+    {255, 0, 0},    // Red
+    {0, 255, 0},    // Pure Green
+    {0, 128, 255}   // Sky Blue
+  };
+  float colorTimer = 0;
+  int colorIndex = 0;
+
   for (;;) {
     uint32_t now = micros();
     float dt = (now - lastFrameMicros) / 1000000.0f;
@@ -357,7 +406,6 @@ void TaskCore1_GameEngine(void *pvParameters) {
 
     if (resetGame) {
       pacmanPos = -16.0f;
-      
       dinoY = 0.0f;
       dinoVy = 0.0f;
       isJumping = false;
@@ -368,9 +416,9 @@ void TaskCore1_GameEngine(void *pvParameters) {
       dinoLives = 3;
       scoreAccum = 0;
       dinoState = 0;
-      
-      autoPlayDino = true;
-      manualJump   = false;
+      colorTimer = 0;
+      colorIndex = 0;
+      manualJump = false;
       resetGame = false;
     }
 
@@ -388,6 +436,18 @@ void TaskCore1_GameEngine(void *pvParameters) {
     }
     else if (mode == 13) { // Dino
       float gameSpeed = 50.0f + (speed - 1) * (180.0f / 9.0f);
+
+      // Handle Automatic Color Cycling (10 colors, 10 seconds each)
+      if (dinoPlayMode == 1) {
+        colorTimer += dt;
+        if (colorTimer >= 10.0f) {
+          colorTimer = 0;
+          colorIndex = (colorIndex + 1) % 10;
+          xSemaphoreTake(uartMutex, portMAX_DELAY);
+          teensySerial.printf("<S,%d,%d,%d>\n", colorPalette[colorIndex][0], colorPalette[colorIndex][1], colorPalette[colorIndex][2]);
+          xSemaphoreGive(uartMutex);
+        }
+      }
       
       if (dinoState == 0) { // PLAYING
         // 1. Scoring
@@ -407,12 +467,10 @@ void TaskCore1_GameEngine(void *pvParameters) {
           }
         }
 
-        // 3. Collision Hitbox Detection ( Adjusted for smaller shrunk sprites )
+        // 3. Collision Hitbox Detection
         bool hit = false;
         for (int i = 0; i < 3; i++) {
-          // Tightened X-Axis Overlap for smaller Dino & smaller Cactus
           if (cactusPos[i] < 46.0f && cactusPos[i] > 36.0f) { 
-            // Tightened Y-Axis Overlap (Cactus is now smaller)
             if (dinoY < 6.0f) { 
               hit = true;
               break;
@@ -422,23 +480,26 @@ void TaskCore1_GameEngine(void *pvParameters) {
 
         if (hit) {
           dinoLives--;
-          autoPlayDino = true; // Auto-play re-engages to save them on respawn until they tap jump
           if (dinoLives <= 0) {
             dinoState = 2; // GAME OVER
-            stateTimer = 4.0f; // Hold game over screen for 4s
+            stateTimer = 4.0f; 
           } else {
             dinoState = 1; // CRASHED
-            stateTimer = 2.0f; // Pause for 2s before respawn
+            stateTimer = 2.0f; 
           }
         } else {
-          // 4. Jump Physics (Higher arc to clear smaller cactuses cleanly)
+          // 4. Jump & Control Physics
           if (!isJumping) {
-            if (manualJump) {
-              isJumping = true;
-              dinoVy = 45.0f; 
-              manualJump = false; 
+            if (dinoPlayMode == 0) {
+              // Manual Mode Processing
+              if (manualJump) {
+                isJumping = true;
+                dinoVy = 45.0f; 
+                manualJump = false; 
+              }
             } 
-            else if (autoPlayDino) {
+            else {
+              // Full Automatic Mode Processing (AI auto-plays)
               float jumpTriggerDist = gameSpeed * 0.42f; 
               for (int i = 0; i < 3; i++) {
                 if (cactusPos[i] > 40.0f && cactusPos[i] < 40.0f + jumpTriggerDist) {
@@ -449,7 +510,7 @@ void TaskCore1_GameEngine(void *pvParameters) {
               }
             }
           } else {
-            manualJump = false; // Clear input if already jumping
+            manualJump = false; 
           }
           
           if (isJumping) {
@@ -468,7 +529,7 @@ void TaskCore1_GameEngine(void *pvParameters) {
         if (stateTimer <= 0) {
           cactusPos[0] = 508.0f; cactusPos[1] = 658.0f; cactusPos[2] = 808.0f;
           dinoY = 0.0f; isJumping = false; dinoVy = 0.0f;
-          dinoState = 0; // Resume playing
+          dinoState = 0; 
         }
       } 
       else if (dinoState == 2) { // GAME OVER
@@ -479,12 +540,12 @@ void TaskCore1_GameEngine(void *pvParameters) {
           scoreAccum = 0;
           cactusPos[0] = 508.0f; cactusPos[1] = 658.0f; cactusPos[2] = 808.0f;
           dinoY = 0.0f; isJumping = false; dinoVy = 0.0f;
-          dinoState = 0; // Restart entirely
+          dinoState = 0; 
         }
       }
 
       xSemaphoreTake(uartMutex, portMAX_DELAY);
-      // Stream sub-pixel physics coordinates & score data to Teensy GPU (Lives tracked silently in background)
+      // Stream sub-pixel physics coordinates & score data (Lives tracked silently in background)
       teensySerial.printf("<F,%d,%d,%d,%d,%d,%d,%d,%d>\n", 
         dinoState, (int)dinoY, isJumping ? 1 : 0, 
         (int)cactusPos[0], (int)cactusPos[1], (int)cactusPos[2],
@@ -492,7 +553,6 @@ void TaskCore1_GameEngine(void *pvParameters) {
       xSemaphoreGive(uartMutex);
     }
 
-    // 60 FPS Engine Lock
     vTaskDelay(16 / portTICK_PERIOD_MS); 
   }
 }
@@ -515,6 +575,7 @@ void setup() {
 
   server.on("/", handleRoot);
   server.on("/setAnim", handleSetAnim);
+  server.on("/dinoMode", handleDinoMode);
   server.on("/jump", handleJump);
   server.on("/set", handleSet);
   server.on("/brightness", handleBrightness);
