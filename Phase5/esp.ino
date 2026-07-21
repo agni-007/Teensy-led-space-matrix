@@ -1,13 +1,27 @@
 #include <WiFi.h>
 #include <WebServer.h>
 
+// =========================================================
+// 🌐 WIFI CONFIG
+// =========================================================
+// AP mode: ESP32 creates its own network — no router needed,
+// just connect your phone directly to it. This is what your
+// original build used, kept as the default here.
 const char* ssid     = "RGB_Control";
 const char* password = "rgb12345";
 
-WebServer server(80);
-HardwareSerial teensySerial(1);  // UART1: RX=GPIO4, TX=GPIO5
+// Want it to join your home WiFi instead? Set this true and
+// point ssid/password at your router's credentials above.
+#define USE_STATION_MODE false
+// =========================================================
 
-String page = R"rawliteral(
+WebServer server(80);
+
+// UART1 to the Teensy — RX=GPIO4, TX=GPIO5 (matches your tested wiring)
+HardwareSerial teensySerial(1);
+
+// ---------- Dashboard page (served from flash) ----------
+const char PAGE[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html>
 <head>
@@ -15,11 +29,11 @@ String page = R"rawliteral(
   <title>Massive Matrix Controller</title>
   <style>
     * { box-sizing:border-box; margin:0; padding:0; }
-    body { background:#0d0d12; color:#f0f0f0; font-family:sans-serif; padding:14px; }
+    body { background:#0d0d12; color:#f0f0f0; font-family:sans-serif; padding:14px; max-width:480px; margin:0 auto; }
     h2 { color:#00c8d4; text-align:center; margin-bottom:14px; font-size:18px; letter-spacing:1px; }
     .card { background:#16161f; border-radius:10px; padding:14px; margin-bottom:12px; }
-    .label { font-size:11px; color:#00c8d4; text-transform:uppercase; letter-spacing:1.2px; font-weight:bold; margin-bottom:6px; }
-    select, input[type=text] {
+    .label { font-size:11px; color:#00c8d4; text-transform:uppercase; letter-spacing:1.2px; font-weight:bold; margin-bottom:8px; }
+    input[type=text] {
       width:100%; padding:10px; border-radius:6px;
       background:#222230; color:white; border:1px solid #00c8d4; font-size:14px;
     }
@@ -30,6 +44,12 @@ String page = R"rawliteral(
     }
     .row2 { display:flex; gap:10px; align-items:center; }
     .row2 > * { flex:1; }
+    .theme-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
+    .theme-btn {
+      background:#222230; border:1px solid #00c8d4; color:#f0f0f0;
+      padding:11px 4px; border-radius:6px; font-size:11.5px; cursor:pointer;
+    }
+    .theme-btn.active { background:#00c8d4; color:#0d0d12; font-weight:bold; }
     button {
       background:#00c8d4; color:#0d0d12; border:none; padding:11px;
       font-size:14px; border-radius:6px; cursor:pointer; font-weight:bold;
@@ -37,6 +57,7 @@ String page = R"rawliteral(
     }
     button:active { background:#009aa4; }
     .btn-off   { background:#333; color:#aaa; }
+    .preset-btn { margin-top:4px; padding:9px; font-size:13px; }
     #status { text-align:center; font-size:12px; color:#00c8d4; margin-top:10px; min-height:16px; }
   </style>
 </head>
@@ -46,17 +67,7 @@ String page = R"rawliteral(
 
 <div class="card">
   <div class="label">Theme</div>
-  <select id="theme" onchange="sendTheme()">
-    <option value="0">Solid Fill</option>
-    <option value="1">Wipe ← Left</option>
-    <option value="2">Wipe Right →</option>
-    <option value="3">Wipe ↓ Top</option>
-    <option value="4">Wipe ↑ Bottom</option>
-    <option value="7">Dual Sync ←→</option>
-    <option value="8">Dual Sync ↕</option>
-    <option value="9">All Sides Converge</option>
-    <option value="11">Scroll Text</option>
-  </select>
+  <div class="theme-grid" id="themeGrid"></div>
 </div>
 
 <div class="card">
@@ -67,8 +78,8 @@ String page = R"rawliteral(
 </div>
 
 <div class="card">
-  <div class="label">Master Brightness &nbsp;<span id="brightLbl" style="color:#fff">40</span></div>
-  <input type="range" id="brightness" min="0" max="255" value="40"
+  <div class="label">Master Brightness &nbsp;<span id="brightLbl" style="color:#fff">35</span></div>
+  <input type="range" id="brightness" min="0" max="255" value="35"
     oninput="document.getElementById('brightLbl').innerText=this.value"
     onchange="sendBrightness()">
 </div>
@@ -78,10 +89,10 @@ String page = R"rawliteral(
   <div class="row2" style="justify-content:center;">
     <input type="color" id="color" value="#00c8d4" onchange="sendColor()">
     <div style="flex:1">
-      <button onclick="setPreset(255,0,0)">Red</button>
-      <button onclick="setPreset(0,255,0)" style="margin-top:4px">Green</button>
-      <button onclick="setPreset(0,0,255)" style="margin-top:4px">Blue</button>
-      <button onclick="setPreset(255,255,255)" style="margin-top:4px">White</button>
+      <button class="preset-btn" onclick="setPreset(255,0,0)">Red</button>
+      <button class="preset-btn" onclick="setPreset(0,255,0)">Green</button>
+      <button class="preset-btn" onclick="setPreset(0,0,255)">Blue</button>
+      <button class="preset-btn" onclick="setPreset(255,255,255)">White</button>
     </div>
   </div>
 </div>
@@ -97,6 +108,36 @@ String page = R"rawliteral(
 <p id="status">System Online</p>
 
 <script>
+const THEMES = [
+  { id: 0,  name: "Solid Fill" },
+  { id: 1,  name: "Wipe ← Left" },
+  { id: 2,  name: "Wipe Right →" },
+  { id: 3,  name: "Wipe ↓ Top" },
+  { id: 4,  name: "Wipe ↑ Bottom" },
+  { id: 7,  name: "Dual Sync ←→" },
+  { id: 8,  name: "Dual Sync ↕" },
+  { id: 9,  name: "All Sides" },
+  { id: 11, name: "Scroll Text" },
+  { id: 12, name: "Pac-Man Loop" },
+];
+
+let activeTheme = 0;
+const grid = document.getElementById('themeGrid');
+THEMES.forEach(t => {
+  const b = document.createElement('button');
+  b.className = 'theme-btn' + (t.id === activeTheme ? ' active' : '');
+  b.textContent = t.name;
+  b.dataset.id = t.id;
+  b.onclick = () => selectTheme(t.id);
+  grid.appendChild(b);
+});
+
+function markActive(id) {
+  document.querySelectorAll('.theme-btn').forEach(b => {
+    b.classList.toggle('active', parseInt(b.dataset.id) === id);
+  });
+}
+
 function hexToRgb(hex) {
   return { r:parseInt(hex.substr(1,2),16), g:parseInt(hex.substr(3,2),16), b:parseInt(hex.substr(5,2),16) };
 }
@@ -108,10 +149,15 @@ function send(url) {
 }
 function setStatus(t) { document.getElementById('status').innerText = t; }
 
+function selectTheme(id) {
+  activeTheme = id;
+  markActive(id);
+  sendTheme();
+}
+
 function sendTheme() {
-  let t = document.getElementById('theme').value;
   let s = document.getElementById('speed').value;
-  send('/setAnim?mode=' + t + '&speed=' + s);
+  send('/setAnim?mode=' + activeTheme + '&speed=' + s);
   setStatus('Theme updated');
 }
 
@@ -136,12 +182,14 @@ function setPreset(r, g, b) {
 function sendScrollText() {
   let msg = document.getElementById('scrollMsg').value;
   if (!msg) { setStatus('Type a message first'); return; }
-  document.getElementById('theme').value = "11";
-  sendTheme();
+  activeTheme = 11;
+  markActive(11);
   send('/text?msg=' + encodeURIComponent(msg)).then(() => setStatus('Scrolling...'));
 }
 
 function clearAll() {
+  activeTheme = 0;
+  markActive(0);
   send('/clear');
   setStatus('Blackout active');
 }
@@ -150,27 +198,40 @@ function clearAll() {
 </html>
 )rawliteral";
 
-void handleRoot() { server.send(200,"text/html", page); }
+void handleRoot() {
+  server.send_P(200, "text/html", PAGE);
+}
 
 void handleSetAnim() {
+  if (!server.hasArg("mode") || !server.hasArg("speed")) {
+    server.send(400, "text/plain", "missing mode/speed"); return;
+  }
   String msg = "<A," + server.arg("mode") + "," + server.arg("speed") + ">\n";
   teensySerial.print(msg); teensySerial.flush();
-  server.send(200,"text/plain","OK");
+  server.send(200, "text/plain", "OK");
 }
 
 void handleSet() {
+  if (!server.hasArg("r") || !server.hasArg("g") || !server.hasArg("b")) {
+    server.send(400, "text/plain", "missing r/g/b"); return;
+  }
   String msg = "<S," + server.arg("r") + "," + server.arg("g") + "," + server.arg("b") + ">\n";
   teensySerial.print(msg); teensySerial.flush();
-  server.send(200,"text/plain","OK");
+  server.send(200, "text/plain", "OK");
 }
 
 void handleBrightness() {
+  if (!server.hasArg("val")) { server.send(400, "text/plain", "missing val"); return; }
   String msg = "<B," + server.arg("val") + ">\n";
   teensySerial.print(msg); teensySerial.flush();
-  server.send(200,"text/plain","OK");
+  server.send(200, "text/plain", "OK");
 }
 
+// Sanitize to exactly the charset FONT_5x7 supports (see fontIndex() in
+// the Teensy sketch) so what you type is what actually renders instead
+// of silently turning into blank spaces on the matrix.
 void handleText() {
+  if (!server.hasArg("msg")) { server.send(400, "text/plain", "missing msg"); return; }
   String msg = server.arg("msg");
   msg.toUpperCase();
   String safe = "";
@@ -183,17 +244,35 @@ void handleText() {
   if (safe.length() > 60) safe = safe.substring(0, 60);
   String out = "<T," + safe + ">\n";
   teensySerial.print(out); teensySerial.flush();
-  server.send(200,"text/plain","OK");
+  server.send(200, "text/plain", "OK");
 }
 
 void handleClear() {
   teensySerial.print("<X>\n"); teensySerial.flush();
-  server.send(200,"text/plain","OK");
+  server.send(200, "text/plain", "OK");
 }
 
 void setup() {
+  Serial.begin(115200);
   teensySerial.begin(115200, SERIAL_8N1, 4, 5);
+
+#if USE_STATION_MODE
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting to WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(400);
+    Serial.print(".");
+  }
+  Serial.println();
+  Serial.print("Connected, IP: ");
+  Serial.println(WiFi.localIP());
+#else
   WiFi.softAP(ssid, password);
+  Serial.print("AP started, IP: ");
+  Serial.println(WiFi.softAPIP());
+#endif
+
   server.on("/", handleRoot);
   server.on("/setAnim", handleSetAnim);
   server.on("/set", handleSet);
@@ -201,6 +280,7 @@ void setup() {
   server.on("/text", handleText);
   server.on("/clear", handleClear);
   server.begin();
+  Serial.println("Dashboard server started");
 }
 
 void loop() {
