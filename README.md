@@ -353,3 +353,26 @@ Introduced dynamic, sprite-based themes to the massive matrix. Removed diagnosti
 * **Infinite Auto-Dino Looprun & Random Gaps:** Upgraded the Chrome Dino full-auto mode to run continuously in an infinite loop. Obstacles now spawn with randomized distance gaps (`random(100, 280)`), paired with an automated AI jump calculator and a 10-second 10-color palette shifting loop.
 * **Arcade Manual Mode & HUD Scoring:** Integrated a backend 3-try life tracking system, real-time score accumulation, and a localized "GAME OVER" display state driven by fast UART packet streaming (`<F>`).
 * **High-Speed UART Pipeline:** Maintained a robust 1.5 Mbps baud rate serial link where the ESP32 acts as the **brains** (math, logic, text parsing, and web state) and the Teensy 4.1 acts purely as a **dumb pixel GPU** (rendering the canvas buffer to the physical LED panels).
+
+---
+
+## Phase 8 — WebSocket Control
+
+### Overview
+Phase 8 introduces a persistent WebSocket connection to replace repeated HTTP request overhead, optimizing control latency. It preserves the Phase 7 architecture split, functioning as an ESP32-only update. The ESP32 handles Wi-Fi, browser control, game physics, and state streaming, while the existing Phase 7 Teensy firmware continues rendering to the 18 parallel WS2812B rows via ObjectFLED.
+
+### Major Architectural Upgrades & Optimizations
+* **Persistent WebSocket Transport:** A single RFC 6455 WebSocket on port 81 replaces repetitive HTTP requests. It features bounded exponential backoff for auto-reconnection and round-trip time tracking.
+* **Compact Browser-to-ESP32 Commands:** Commands for theme/speed (`A`), color (`S`), brightness (`B`), scrolling text (`T`), and game modes (`D`, `J`, `X`) are highly optimized for fast parsing and transmission.
+* **RTOS & Networking Enhancements:** The network loop runs every FreeRTOS tick on core 0. Wi-Fi modem sleep is disabled to favor latency. The library's TCP no-delay behavior and heartbeat are enforced.
+* **Concurrency Fixes:** Replaced simple `volatile` variables with critical sections for cross-core state management. Serialized UART writes from both cores using a mutex.
+* **Game Timing Precision:** Game pacing switched to `vTaskDelayUntil()` to eliminate task-delay drift.
+
+### Summary — Phase 8
+
+| Layer | Component | Role |
+|---|---|---|
+| Network | ESP32 (WiFi AP + WebSocket) | Fast WebSocket transport on port 81, disables Wi-Fi sleep for low latency |
+| Link | UART Serial1 1.5 Mbps | Compact framed commands sent from ESP32, concurrency managed via mutex |
+| Rendering | Teensy 4.1 + ObjectFLED | Unchanged from Phase 7; continues to render matrix and handle dumb GPU tasks |
+| Output | 18×508 WS2812B matrix | Maintains 35 brightness cap and preset RGB/text routings fixed from ESP32 |
