@@ -14,6 +14,7 @@
 #define GLYPH_H       7
 #define CHAR_SPACING  1
 #define MAX_SAFE_BRIGHTNESS 35
+#define LED_COLOR_ORDER CORDER_GRB
 
 uint8_t rowPins[NUM_ROWS] = { 3, 5, 7, 9, 11, 24, 26, 28, 30, 32, 37, 39, 41, 14, 16, 18, 20, 22 };
 
@@ -24,7 +25,9 @@ float rowSpeedComp[NUM_ROWS] = {
 };
 
 CRGB canvas[NUM_ROWS][LEDS_PER_ROW];
-ObjectFLED leds(NUM_ROWS * LEDS_PER_ROW, canvas, CORDER_GRB, NUM_ROWS, rowPins, 0);
+// ObjectFLED receives normal CRGB values and performs the physical WS2812B
+// GRB wire-order conversion exactly once when generating its DMA buffer.
+ObjectFLED leds(NUM_ROWS * LEDS_PER_ROW, canvas, LED_COLOR_ORDER, NUM_ROWS, rowPins, 0);
 
 enum ThemeID {
   THEME_STATIC      = 0,
@@ -62,12 +65,20 @@ const uint8_t PACMAN_OPEN[8] = {
   0b01111000, 0b11111000, 0b11110000, 0b11100000,
   0b11100000, 0b11110000, 0b11111000, 0b01111000
 };
+const uint8_t GHOST_FRAME_1[8] = {
+  0b00111100, 0b01111110, 0b11111111, 0b11011011,
+  0b11111111, 0b11111111, 0b10100101, 0b01011010
+};
+const uint8_t GHOST_FRAME_2[8] = {
+  0b00111100, 0b01111110, 0b11111111, 0b11011011,
+  0b11111111, 0b11111111, 0b01011010, 0b10100101
+};
 
-const float DINO_X_POS = 40.0f;
+const float DINO_X_POS = 458.0f;
 int   dinoState  = 0; 
 float dinoY      = 0.0f;  
 bool  isJumping  = false;
-float cactusPos[3] = { 508.0f, 658.0f, 808.0f }; 
+float cactusPos[3] = { -10.0f, -170.0f, -340.0f };
 int   dinoScore  = 0;
 int   dinoLives  = 3;
 
@@ -164,6 +175,13 @@ bool isSupportedTheme(int theme) {
          theme == 11 || theme == 12 || theme == 13;
 }
 
+void setPixelLogical(int x, int y, CRGB color) {
+  if (x < 0 || x >= LEDS_PER_ROW || y < 0 || y >= NUM_ROWS) return;
+  int finalC = INVERT_X_AXIS ? (LEDS_PER_ROW - 1 - x) : x;
+  int finalR = INVERT_Y_AXIS ? (NUM_ROWS - 1 - y) : y;
+  canvas[finalR][finalC] = color;
+}
+
 void drawString(const char* text, int x, int y, CRGB color) {
   for (size_t i = 0; text[i] != '\0'; i++) {
     int charIdx = fontIndex(text[i]);
@@ -171,14 +189,8 @@ void drawString(const char* text, int x, int y, CRGB color) {
       for (int bitCol = 0; bitCol < 5; bitCol++) {
         bool lit = (FONT_5x7[charIdx][r] >> (4 - bitCol)) & 0x01;
         if (lit) {
-          int logicalR = INVERT_Y_AXIS ? (7 - 1 - r) : r;
-          int finalR = logicalR + y;
           int logicalC = x + (i * 6) + bitCol;
-          int finalC = INVERT_X_AXIS ? (LEDS_PER_ROW - 1 - logicalC) : logicalC;
-          
-          if (finalR >= 0 && finalR < NUM_ROWS && finalC >= 0 && finalC < LEDS_PER_ROW) {
-            canvas[finalR][finalC] = color;
-          }
+          setPixelLogical(logicalC, y + r, color);
         }
       }
     }
@@ -431,12 +443,9 @@ void renderTextScroll() {
   int textPixelWidth = scrollText.length() * CHAR_PITCH;
   if (textPixelWidth <= 0) return;
 
-  const int glyphPixelWidth  = GLYPH_W * FONT_SCALE_X; 
-  const int glyphPixelHeight = GLYPH_H * FONT_SCALE_Y; 
-
-  for (int c = 0; c < LEDS_PER_ROW; c++) {
-    int logicalC = INVERT_X_AXIS ? (LEDS_PER_ROW - 1 - c) : c;
-    int fontCol  = logicalC - (int)scrollPos;
+  const int glyphPixelWidth = GLYPH_W * FONT_SCALE_X;
+  for (int x = 0; x < LEDS_PER_ROW; x++) {
+    int fontCol = x - (int)scrollPos;
 
     if (fontCol >= 0 && fontCol < textPixelWidth) {
       int charIdx   = fontCol / CHAR_PITCH;
@@ -446,81 +455,92 @@ void renderTextScroll() {
         int glyphIndex = fontIndex(scrollText.charAt(charIdx));
         int bitCol     = colInChar / FONT_SCALE_X; 
 
-        for (int r = 0; r < glyphPixelHeight; r++) {
-          int  bitRow = r / FONT_SCALE_Y; 
+        // Map the 7-row font over all 18 physical rows. This intentionally
+        // uses non-uniform integer scaling so there is no fixed 2 px gutter.
+        for (int y = 0; y < NUM_ROWS; y++) {
+          int  bitRow = (y * GLYPH_H) / NUM_ROWS;
           bool lit    = (FONT_5x7[glyphIndex][bitRow] >> (4 - bitCol)) & 0x01;
-
-          if (lit) {
-            int logicalR = INVERT_Y_AXIS ? (glyphPixelHeight - 1 - r) : r;
-            int finalRow = logicalR + 2;
-
-            if (finalRow >= 0 && finalRow < NUM_ROWS) {
-              canvas[finalRow][c] = CRGB(fgR, fgG, fgB);
-            }
-          }
+          if (lit) setPixelLogical(x, y, CRGB(fgR, fgG, fgB));
         }
       }
+    }
+  }
+}
+
+void draw8x8Sprite(const uint8_t* frame, int x, int y, int scale, CRGB color) {
+  for (int sy = 0; sy < 8; sy++) {
+    for (int sx = 0; sx < 8; sx++) {
+      if (((frame[sy] >> (7 - sx)) & 0x01) == 0) continue;
+      for (int oy = 0; oy < scale; oy++)
+        for (int ox = 0; ox < scale; ox++)
+          setPixelLogical(x + sx * scale + ox, y + sy * scale + oy, color);
     }
   }
 }
 
 void renderPacman() {
   clearCanvas();
-  const uint8_t* frame = ((millis() / 150) % 2 == 0) ? PACMAN_OPEN : PACMAN_CLOSED;
-  int spriteW    = 8 * PACMAN_SCALE;
-  int spriteH    = 8 * PACMAN_SCALE;
-  int rowOffset  = (NUM_ROWS - spriteH) / 2; 
+  const bool alternate = ((millis() / 140) % 2) == 0;
+  const uint8_t* pacFrame = alternate ? PACMAN_OPEN : PACMAN_CLOSED;
+  const uint8_t* ghostFrame = alternate ? GHOST_FRAME_1 : GHOST_FRAME_2;
+  const int pacX = (int)pacmanPos;
+  const int centerY = NUM_ROWS / 2;
 
-  for (int sc = 0; sc < spriteW; sc++) {
-    int c = (int)pacmanPos + sc;
-    if (c < 0 || c >= LEDS_PER_ROW) continue;
-
-    int bitCol = sc / PACMAN_SCALE; 
-    for (int sr = 0; sr < spriteH; sr++) {
-      int  bitRow = sr / PACMAN_SCALE;
-      bool lit    = (frame[bitRow] >> (7 - bitCol)) & 0x01;
-
-      if (lit) {
-        int finalRow = rowOffset + sr;
-        if (finalRow >= 0 && finalRow < NUM_ROWS) {
-          canvas[finalRow][c] = CRGB(fgR, fgG, fgB);
-        }
-      }
+  // Repeating pellet lane. Pellets behind Pac-Man stay eaten until the chase
+  // loops, while power pellets pulse without changing the game frame rate.
+  for (int x = 12; x < LEDS_PER_ROW; x += 18) {
+    if (x <= pacX + 12) continue;
+    bool powerPellet = ((x / 18) % 8) == 0;
+    uint8_t level = powerPellet && alternate ? 255 : 150;
+    setPixelLogical(x, centerY, CRGB(level, level, 105));
+    if (powerPellet) {
+      setPixelLogical(x, centerY - 1, CRGB(level, level, 105));
+      setPixelLogical(x + 1, centerY, CRGB(level, level, 105));
     }
   }
+
+  const CRGB ghostColors[3] = { CRGB(255, 28, 48), CRGB(255, 105, 180), CRGB(0, 220, 255) };
+  for (int i = 0; i < 3; i++) {
+    int ghostX = pacX - 52 - i * 38;
+    draw8x8Sprite(ghostFrame, ghostX, 1, PACMAN_SCALE, ghostColors[i]);
+    // Directional eyes make the sprites read as pursuing ghosts, even from a
+    // distance on the 18-row installation.
+    for (int eyeY = 7; eyeY <= 8; eyeY++) {
+      setPixelLogical(ghostX + 4, eyeY, CRGB::White);
+      setPixelLogical(ghostX + 5, eyeY, CRGB(30, 60, 255));
+      setPixelLogical(ghostX + 10, eyeY, CRGB::White);
+      setPixelLogical(ghostX + 11, eyeY, CRGB(30, 60, 255));
+    }
+  }
+
+  draw8x8Sprite(pacFrame, pacX, 1, PACMAN_SCALE, CRGB(255, 220, 0));
+  setPixelLogical(pacX + 9, 4, CRGB::Black);
+  setPixelLogical(pacX + 10, 4, CRGB::Black);
 }
 
 void renderDino() {
   clearCanvas();
 
-  // HUD: Display Score and Game Over state using data streamed from ESP32
+  // Dino is anchored at the right; keep its score HUD at the opposite end.
   char scoreText[24];
-  snprintf(scoreText, sizeof(scoreText), "SCORE %d", dinoScore);
-  drawString(scoreText, 10, 0, CRGB(fgR, fgG, fgB));
+  snprintf(scoreText, sizeof(scoreText), "SCORE %d L%d", dinoScore, dinoLives);
+  drawString(scoreText, 2, 0, CRGB(fgR, fgG, fgB));
   if (dinoState == 2) {
-    drawString("GAME OVER", 230, 6, CRGB(255, 0, 0));
+    drawString("GAME OVER", 214, 6, CRGB(255, 0, 0));
   }
 
   CRGB groundColor = CRGB(fgR, fgG, fgB);
   groundColor.fadeToBlackBy(180);
-  for (int c = 0; c < LEDS_PER_ROW; c++) {
-    canvas[17][c] = groundColor;
-  }
+  for (int x = 0; x < LEDS_PER_ROW; x++) setPixelLogical(x, 17, groundColor);
 
   if (dinoState != 2) {
     for (int i = 0; i < 3; i++) {
       int cx = (int)cactusPos[i];
       for (int sc = 0; sc < 10; sc++) {
-        int c = cx + sc;
-        if (c < 0 || c >= LEDS_PER_ROW) continue;
+        int x = cx + sc;
         for (int sr = 0; sr < 10; sr++) {
           bool lit = (DINO_CACTUS[sr] >> (9 - sc)) & 0x01;
-          if (lit) {
-            int r = 7 + sr; 
-            if (r >= 0 && r < NUM_ROWS) {
-              canvas[r][c] = CRGB(fgR, fgG, fgB);
-            }
-          }
+          if (lit) setPixelLogical(x, 7 + sr, CRGB(fgR, fgG, fgB));
         }
       }
     }
@@ -540,16 +560,10 @@ void renderDino() {
     int dy = (int)dinoY; 
 
     for (int sc = 0; sc < 10; sc++) {
-      int c = dx + sc;
-      if (c < 0 || c >= LEDS_PER_ROW) continue;
+      int x = dx + sc;
       for (int sr = 0; sr < 10; sr++) {
-        bool lit = (dFrame[sr] >> (9 - sc)) & 0x01;
-        if (lit) {
-          int r = 7 + sr - dy; 
-          if (r >= 0 && r < NUM_ROWS) {
-            canvas[r][c] = CRGB(fgR, fgG, fgB);
-          }
-        }
+        bool lit = (dFrame[sr] >> sc) & 0x01;
+        if (lit) setPixelLogical(x, 7 + sr - dy, CRGB(fgR, fgG, fgB));
       }
     }
   }
